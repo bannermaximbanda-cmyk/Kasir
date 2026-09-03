@@ -31,24 +31,27 @@ Build an ultra-complete, responsive, modular POS & ERP Retail Enterprise web app
 - Functional POS cart, quantity controls, category/search filtering, PPN calculation, payment flow, receipt modal, and stock decrement.
 - Local product persistence, restock workflow, expense entry, product creation, CSV export, QR/print feedback, and responsive mobile layout.
 - FastAPI MongoDB-backed API endpoints for products, stock adjustments, expenses, sales, and dashboard summaries.
+- JWT cookie authentication with four seeded demo roles, protected role permissions, logout, demo credentials, and multi-outlet switching.
+- Self-service meja with table selection, QRIS code persistence, menu cart, and order submission to the vendor queue.
+- Vendor Center with kitchen queue, status updates, commission settlement, net payout calculation, and payout request feedback.
+- POS, product, stock, and self-order actions now attempt backend API persistence and retain localStorage fallback.
 - Desktop and mobile smoke testing completed successfully; production frontend build passes.
 
 ## Prioritized Backlog
-- P0: Connect frontend mutations and initial reads to FastAPI persistence.
-- P0: Add JWT login, seeded users, and server-side role permissions.
+- P0: Connect initial product/expense reads to FastAPI persistence and add offline sync queue.
+- P0: Add production password rotation and account administration.
 - P1: Add Supabase Transaction Pooler sync once the project URI is supplied.
-- P1: Add real tenant settlement and split kitchen tickets.
+- P1: Add real tenant settlement ledger and split kitchen tickets per vendor.
 - P2: Add real WhatsApp provider, QR payment provider, branding upload, and thermal printer bridge.
 
 ## Remaining P0/P1/P2 Features
-- P0: Authentication/RBAC is currently a role-switcher demo, not server authentication.
-- P0: Frontend actions currently prioritize localStorage; backend business APIs are available but not yet the default client transport.
+- P0: Initial product and expense hydration still uses seeded client data; API write-through is active for POS, products, restock, QRIS, and self-order.
 - P1: Supabase integration is not active because no valid Transaction Pooler URI was supplied.
-- P1: Vendor payout, automatic order splitting, and audit-grade stock opname calculations remain next phase.
+- P1: Real payout transfer, automatic kitchen ticket printing, and audit-grade stock opname calculations remain next phase.
 - P2: Production QRIS/WhatsApp, printer configuration, backup/restore UI, and branded upload.
 
 ## Next Tasks
 1. Supply and validate the Supabase Transaction Pooler URI.
-2. Wire React reads/mutations to FastAPI with localStorage queue fallback.
-3. Add JWT authentication and role permission guards.
+2. Add background sync queue for offline writes and initial API hydration.
+3. Add password rotation and user administration screens.
 4. Extend settlement, kitchen tickets, printer, and real notification integrations.

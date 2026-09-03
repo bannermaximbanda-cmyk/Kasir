@@ -1,0 +1,21 @@
+{
+  "summary": "Validated the implemented MJD Kupi auth, RBAC, outlet, self-order/vendor, settlement APIs and live mobile SPA flows. Backend regression passed 4/4 and frontend build passed; mobile self-service and POS receipt passed with no horizontal overflow.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "QRIS save", "issue": "Simpan QRIS only displays a toast and does not call POST /api/settings/qris, so entered QRIS is not persisted across devices or sessions.", "affected_selectors": ["[data-testid='qris-code-input']", "[data-testid='save-qris-button']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_mjd_kupi_auth_orders.py", "/app/test_reports/pytest/iteration_3_results.xml"],
+  "action_items": ["Wire SelfService save QRIS to POST /api/settings/qris with the active outlet and handle API errors."],
+  "critical_code_review_comments": ["SelfService.send currently uses an unauthenticated order request as intended for customer ordering, but QRIS state is never sent to the implemented settings endpoint."],
+  "updated_files": ["/app/backend/tests/test_mjd_kupi_auth_orders.py", "/app/test_reports/iteration_3.json", "/app/test_reports/pytest/iteration_3_results.xml"],
+  "success_rate": {"backend": "100% (4/4)", "frontend": "100% for executed mobile flows/build; QRIS persistence integration failed"},
+  "seed_data_creation": "Created one TEST self-order and TEST-QRIS setting through public regression APIs; no production records modified.",
+  "retest_needed": true,
+  "should_call_test_agent_after_fix": true,
+  "context_for_next_testing_agent": "Auth all four roles, auth/me/logout cookies, unauthorized rejection, outlet list, QRIS API permission, self-order queue/status/settlement, mobile self-service and POS receipt were tested. Supabase, payout transfer, printer, WhatsApp, real QR generation/storage remain MOCKED/deferred.",
+  "rca of the issue": "App.js SelfService save button calls notify() only; unlike the tested backend route, it has no axios POST and does not retain qris_code beyond component state."
+}
