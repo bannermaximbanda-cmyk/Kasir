@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 5 full regression after Supabase migration + 5 new features (Merchant, Shift, Multi-channel Payment, KDS, Printer Settings). Backend: 18/18 pytest passed. Frontend: Kasir login, shift open/close, multi-channel POS payment, receipt modal (WhatsApp + Print), KDS ticket lifecycle, and Vendor KDS view all verified.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "POS shift banner reactivity", "issue": "After clicking 'Mulai shift', pos-shift-warning banner remained visible for a few seconds (polling interval is 3s, banner is not force-refreshed from open-shift response). Functionally shift IS opened (subsequent sale succeeds), but UX shows stale warning until next poll cycle.", "affected_selectors": ["[data-testid='pos-shift-warning']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_mjd_kupi_full.py",
+    "/app/test_reports/pytest/iteration_5_results.xml"
+  ],
+  "action_items": [
+    "Optional UX polish: After shift-open modal submit, optimistically update local shift state (or force refetch) so the pos-shift-warning banner disappears immediately instead of waiting for the 3s poll."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 889 lines; consider splitting into routers (auth/pos/kds/shifts/settings) — approaching 700-line soft limit.",
+    "CORS middleware is added AFTER app.include_router(api_router); Starlette applies middleware regardless of order, but convention/readability prefers configuring middleware before routes.",
+    "Login sets cookies with samesite='none', secure=True — correct for cross-site preview URL, but ensure production origin is under HTTPS (it is).",
+    "on_event('startup')/('shutdown') are deprecated in FastAPI; migrate to lifespan handler when convenient.",
+    "PATCH /api/vendor/orders/{order_id} takes `status` as a raw query param instead of a Pydantic body — inconsistent with other PATCH endpoints (e.g. /api/kds/orders uses KdsStatusInput).",
+    "bcrypt.hashpw called synchronously inside async seed loop — acceptable on startup only; not a request-path issue.",
+    "list_expenses orders by String date column (works because ISO YYYY-MM-DD sorts lexically) — fine, but a real DATE column would be safer."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_mjd_kupi_full.py",
+    "/app/test_reports/iteration_5.json",
+    "/app/test_reports/pytest/iteration_5_results.xml"
+  ],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "100% of executed flows"},
+  "test_credentials": "See /app/memory/test_credentials.md — 4 demo roles all verified.",
+  "seed_data_creation": "Tests create TEST_-prefixed merchants, expenses, sales, self-orders. Seeded merchants/products/users from startup already present in Supabase.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest suite at /app/backend/tests/test_mjd_kupi_full.py covers auth (all 4 roles + bad password + me), seed data (4 merchants, 6 products bound to merchant_id), merchant RBAC (kasir/vendor 403), shift enforcement (400 'Buka shift terlebih dahulu' without shift), full shift+multi-merchant sale+KDS ticket split+Selesai lifecycle+shift close variance math, Transfer & QRIS payment methods, self-order + vendor visibility, printer settings roundtrip, expenses ordered by date. Run with: REACT_APP_BACKEND_URL=<url> python -m pytest backend/tests/test_mjd_kupi_full.py -v -o addopts=. Note pytest.ini enables xdist by default; use -o addopts= to disable for env-var runs.",
+  "rca of the issue": "Minor UX-only observation: warning banner reactivity depends on 3s polling; no functional impact — sale after shift-open succeeds on backend (shift_id present in Sale). Recommend passing shift-open response into local state to update UI immediately."
+}

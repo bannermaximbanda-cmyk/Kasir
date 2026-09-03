@@ -1,57 +1,54 @@
-# MJD Kupi — Product Requirements Document
+# MJD Kupi — Product Requirements (Living Doc)
 
-## Original Problem Statement
-Build an ultra-complete, responsive, modular POS & ERP Retail Enterprise web application named MJD Kupi with a clean white and vibrant orange desktop-game-launcher-inspired SPA/PWA interface. Required areas include role-based access, multi-tenant vendors, POS, inventory, expenses, product/HPP costing, tenant settlement, QR table ordering, printer/branding settings, financial reports, export, and database persistence with Supabase/Firebase plus localStorage fallback.
+## Original problem
+Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & Vibrant Orange. Modul: RBAC 4 role (Super Admin, Merchant Admin, Vendor, Kasir), Inventory/Stock, Expense, Costing/HPP, POS terminal, QR meja self-order, KDS, Shift kasir, Multi-channel payment, Printer configurator, WhatsApp notif per vendor, Laporan P&L konsolidasi.
 
-## Architecture Decisions
-- React SPA with responsive CSS and a fixed operational sidebar.
-- Offline-first localStorage is the active client fallback for fast demo operation.
-- FastAPI endpoints use the existing MongoDB environment and expose products, stock adjustment, expenses, sales, and dashboard summaries.
-- Supabase synchronization is deferred until a valid Transaction Pooler URI is provided; existing protected environment values remain unchanged.
-- POS data model separates products by vendor/tenant and sales by line item.
+## Architecture
+- **Backend**: FastAPI + SQLAlchemy 2.0 async + asyncpg → **Supabase PostgreSQL (transaction pooler)**.
+- **Frontend**: React 19 + Tailwind + Shadcn UI (Clean White / Vibrant Orange theme).
+- **Auth**: JWT via HttpOnly cookies + Bearer token, bcrypt password hash, seeded 4 demo roles on startup.
+- **Realtime**: Polling 3s (KDS) & 5s (Vendor Center) for MVP.
+- **Storage**: 100% Supabase (localStorage removed as source of truth).
 
-## User Personas
-- Super Admin: consolidated oversight across merchants and vendors.
-- Merchant Admin: manages outlet products, inventory, expenses, and finance.
-- Vendor: monitors tenant products and kitchen/order activity.
-- Kasir: completes fast POS transactions and receipts.
+## User personas
+1. **Super Admin (Holding Owner)** — Full access, konsolidasi laporan.
+2. **Merchant Admin (Manager)** — CRUD produk/merchant, pengeluaran, laporan.
+3. **Vendor / Tenant** — KDS + Pusat Vendor + Self-Service.
+4. **Kasir (Operator)** — POS + KDS + Shift management.
 
-## Core Requirements (Static)
-- White/orange operational UI, responsive at desktop and mobile widths.
-- Role switcher and merchant context in the top bar.
-- POS menu search/filter, cart quantities, tax, payment, and receipt.
-- Inventory stock summary, restock, stock opname entry point, and low-stock indicators.
-- Expense ledger and quick entry.
-- Product catalog with price, HPP, margin, and vendor.
-- Profit & loss summary, export CSV, and table QR studio.
-- Unique data-testid values on user-facing and interactive controls.
+## Core requirements (static)
+- Multi-tenant produk terhubung ke `merchant_id`
+- Kitchen tickets auto-split per merchant saat sale
+- Shift kasir wajib dibuka sebelum transaksi
+- Multi-channel payment (Cash/Transfer/QRIS)
+- Live KDS dengan SLA color coding + chime
+- WA click-to-chat per merchant untuk tiket dapur
+- Printer thermal 58/80mm, split kitchen toggle
 
-## Implemented (2026)
-- Full SPA shell with Ringkasan, Terminal POS, Inventori & Stok, Pengeluaran, Produk & HPP, Laporan Keuangan, and QR Meja modules.
-- Functional POS cart, quantity controls, category/search filtering, PPN calculation, payment flow, receipt modal, and stock decrement.
-- Local product persistence, restock workflow, expense entry, product creation, CSV export, QR/print feedback, and responsive mobile layout.
-- FastAPI MongoDB-backed API endpoints for products, stock adjustments, expenses, sales, and dashboard summaries.
-- JWT cookie authentication with four seeded demo roles, protected role permissions, logout, demo credentials, and multi-outlet switching.
-- Self-service meja with table selection, QRIS code persistence, menu cart, and order submission to the vendor queue.
-- Vendor Center with kitchen queue, status updates, commission settlement, net payout calculation, and payout request feedback.
-- POS, product, stock, and self-order actions now attempt backend API persistence and retain localStorage fallback.
-- Desktop and mobile smoke testing completed successfully; production frontend build passes.
+## Implemented (Feb 2026, this session)
+- [x] Migrasi lengkap MongoDB → Supabase Postgres (SQLAlchemy async + asyncpg, statement_cache_size=0)
+- [x] Model DB: users, outlets, merchants, products, stock_logs, expenses, sales, self_orders, kitchen_orders, shifts, settings
+- [x] Auth 4 role + JWT cookie + bearer
+- [x] Merchant CRUD (RBAC-gated) + sinkron ke produk vendor
+- [x] Product CRUD (bind ke merchant_id + delete)
+- [x] Inventory: Barang Masuk / Keluar / Opname (stock_logs terpisah)
+- [x] Expenses CRUD dengan kategori & metode
+- [x] POS multi-channel payment (Cash + kembalian, Transfer + ref, QRIS dinamis)
+- [x] Kasir shift open/close + variance kalkulasi otomatis (opening + cash_sales vs closing)
+- [x] Kitchen Display System (KDS) live, polling 3s, SLA hijau/kuning/merah, chime WebAudio, status Diproses → Siap → Selesai
+- [x] Receipt modal dengan split kitchen ticket + WhatsApp share (wa.me) per merchant + tombol cetak
+- [x] Self-service QR (tanpa auth) + auto kitchen ticket
+- [x] Printer settings (58/80mm, USB/BT/Network, auto-print, split kitchen) tersimpan di Supabase
+- [x] Laporan P&L Statement + Export CSV
+- [x] Seed otomatis: 4 merchants, 6 products, 4 demo users, 2 outlets, 2 expenses
+- [x] Test coverage: 18/18 backend pytest passed, 100% frontend flows validated
 
-## Prioritized Backlog
-- P0: Connect initial product/expense reads to FastAPI persistence and add offline sync queue.
-- P0: Add production password rotation and account administration.
-- P1: Add Supabase Transaction Pooler sync once the project URI is supplied.
-- P1: Add real tenant settlement ledger and split kitchen tickets per vendor.
-- P2: Add real WhatsApp provider, QR payment provider, branding upload, and thermal printer bridge.
-
-## Remaining P0/P1/P2 Features
-- P0: Initial product and expense hydration still uses seeded client data; API write-through is active for POS, products, restock, QRIS, and self-order.
-- P1: Supabase integration is not active because no valid Transaction Pooler URI was supplied.
-- P1: Real payout transfer, automatic kitchen ticket printing, and audit-grade stock opname calculations remain next phase.
-- P2: Production QRIS/WhatsApp, printer configuration, backup/restore UI, and branded upload.
-
-## Next Tasks
-1. Supply and validate the Supabase Transaction Pooler URI.
-2. Add background sync queue for offline writes and initial API hydration.
-3. Add password rotation and user administration screens.
-4. Extend settlement, kitchen tickets, printer, and real notification integrations.
+## Backlog (P1/P2)
+- P1: Optimistic banner update on shift-open (currently waits for next 3s poll)
+- P1: Refactor server.py (889 lines) into router modules
+- P1: Real QRIS payment gateway integration (Xendit / Midtrans)
+- P1: Real thermal printer driver (Web Bluetooth / ESC-POS)
+- P2: Alembic migrations replacing metadata.create_all
+- P2: Supabase Realtime channels (currently polling)
+- P2: Loyalty / member program
+- P2: E-invoice / faktur pajak
