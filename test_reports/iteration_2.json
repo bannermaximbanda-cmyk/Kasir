@@ -1,0 +1,24 @@
+{
+  "summary": "Retested MJD Kupi after the iteration-1 fixes. Business APIs, mobile width, desktop POS flow, and frontend build all passed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "SPA business mutations", "issue": "The frontend still uses React state/localStorage and does not call the newly available backend products, expenses, sales, or dashboard endpoints.", "affected_selectors": ["[data-testid='save-product-button']", "[data-testid^='restock-']", "[data-testid='add-expense-button']", "[data-testid='pay-order-button']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_status_regression.py", "/app/test_reports/pytest/iteration_2_results.xml"],
+  "action_items": ["Wire frontend product, stock, expense, sale, and dashboard state to the backend APIs if backend synchronization is required."],
+  "critical_code_review_comments": ["App.js remains a large monolithic module and its requested ERP API integration is not connected; current success is demo/localStorage behavior."],
+  "updated_files": ["/app/test_reports/iteration_2.json", "/app/test_reports/pytest/iteration_2_results.xml"],
+  "success_rate": {"backend": "100% for tested status and requested business API flows", "frontend": "100% for tested mobile/desktop flows and build"},
+  "seed_data_creation": "Created TEST-prefixed product, expense, and sale through public APIs; also created one UI-only localStorage product. Persistent test records were not deleted.",
+  "retest_needed": true,
+  "should_call_test_agent_after_fix": true,
+  "context_for_next_testing_agent": "Verified GET/POST products, stock PATCH, GET/POST expenses, POST sales with stock decrement, dashboard totals, 390px overflow, desktop POS payment/receipt, product creation, and yarn build. Auth/RBAC and real Supabase/WhatsApp/QRIS integrations remain untested or mocked.",
+  "rca of the issue": "The earlier mobile overflow was fixed by html/body/#root overflow-x containment. The remaining sync gap is architectural: App.js mutates local state/localStorage directly and contains no fetch calls to the backend routes; Supabase is also not connected."
+}
