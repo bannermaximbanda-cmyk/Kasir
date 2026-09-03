@@ -19,10 +19,13 @@ class User(Base):
     __tablename__ = "mjd_users"
     id = Column(String(36), primary_key=True, default=gen_uuid)
     email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(64), unique=True, nullable=True, index=True)
     password_hash = Column(String(255), nullable=False)
+    plain_password = Column(String(255), default="")  # Only shown to Super Admin (internal admin tooling)
     role = Column(String(32), nullable=False, index=True)
     name = Column(String(120), nullable=False)
     outlet_id = Column(String(36), default="outlet-sudirman")
+    active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
@@ -31,6 +34,7 @@ class Outlet(Base):
     id = Column(String(36), primary_key=True, default=gen_uuid)
     name = Column(String(120), nullable=False)
     address = Column(String(255), default="")
+    phone = Column(String(32), default="")
     active = Column(Boolean, default=True)
 
 
@@ -82,6 +86,9 @@ class Expense(Base):
     date = Column(String(32), default="")
     method = Column(String(32), default="Cash")
     outlet_id = Column(String(36), default="outlet-sudirman")
+    user_id = Column(String(36), index=True, nullable=True)
+    user_name = Column(String(120), default="")
+    shift_id = Column(String(36), index=True, nullable=True)
 
 
 class Sale(Base):

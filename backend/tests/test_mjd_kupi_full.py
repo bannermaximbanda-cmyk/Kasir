@@ -14,8 +14,8 @@ BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
 CREDS = {
-    "super":  ("superadmin@mjd-kupi.local", "MjdKupi#2026", "Super Admin"),
-    "admin":  ("manager@mjd-kupi.local",    "MjdKupi#2026", "Merchant Admin"),
+    "super":  ("superadmin@mjd-kupi.local", ".Superadmin1_", "Super Admin"),
+    "admin":  ("manager@mjd-kupi.local",    "MjdKupi#2026", "Admin"),
     "vendor": ("vendor@mjd-kupi.local",     "MjdKupi#2026", "Vendor"),
     "kasir":  ("kasir@mjd-kupi.local",      "MjdKupi#2026", "Kasir"),
 }
@@ -86,7 +86,7 @@ class TestAuth:
     def test_me(self, admin_client):
         r = admin_client.get(f"{API}/auth/me", timeout=30)
         assert r.status_code == 200
-        assert r.json()["role"] == "Merchant Admin"
+        assert r.json()["role"] == "Admin"
 
 
 # ---------------------------------------------------------------------------

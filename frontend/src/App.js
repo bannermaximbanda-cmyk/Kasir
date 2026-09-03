@@ -6,8 +6,10 @@ import {
   Database, DollarSign, FileText, Grid2X2, LogOut, Menu, Package, Plus,
   Printer, QrCode, Receipt, Search, Settings2, ShoppingCart, Store, Timer,
   Trash2, Users, Wallet, X, Building2, Volume2, MessageCircle, PlayCircle,
-  StopCircle, UserCheck, Upload, Image as ImageIcon, Check, Copy,
+  StopCircle, UserCheck, Upload, Image as ImageIcon, Check, Copy, Shield,
+  Eye, EyeOff, RefreshCw, Bluetooth,
 } from "lucide-react";
+import { pairPrinter, directPrint, isPrinterConnected, pairedPrinterName, isPrinterSupported, buildSaleReceipt, buildShiftReport, buildKitchenTicket } from "@/utils/thermalPrinter";
 import "@/App.css";
 
 const money = (n) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
@@ -16,10 +18,10 @@ const ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
 axios.defaults.withCredentials = true;
 
 const NAV_BY_ROLE = {
-  "Super Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "settings"],
-  "Merchant Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "settings"],
+  "Super Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "users", "settings"],
+  "Admin": ["overview", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "vendor-center"],
   Vendor: ["kds", "vendor-center", "self-service"],
-  Kasir: ["pos", "kds", "self-service"],
+  Kasir: ["pos", "expenses", "kds"],
 };
 const NAV_ITEMS = [
   { id: "overview", label: "Ringkasan", icon: BarChart3 },
@@ -34,7 +36,8 @@ const NAV_ITEMS = [
   { id: "tables", label: "QR Meja", icon: Grid2X2 },
   { id: "self-service", label: "Self-Service", icon: QrCode },
   { id: "vendor-center", label: "Pusat Vendor", icon: Users },
-  { id: "settings", label: "Pengaturan", icon: Settings2 },
+  { id: "users", label: "User & Security", icon: Shield },
+  { id: "settings", label: "Pengaturan Sistem", icon: Settings2 },
 ];
 
 export default function App() {
@@ -68,6 +71,7 @@ function AdminApp() {
   const [onlineOrders, setOnlineOrders] = useState([]);
   const [showOnlineOrders, setShowOnlineOrders] = useState(false);
   const [shiftReport, setShiftReport] = useState(null);
+  const [brandLogo, setBrandLogo] = useState("");
   const prevOnlineIdsRef = useRef(new Set());
   const chimeRef = useRef(null);
   const printerRef = useRef(null);
@@ -100,6 +104,7 @@ function AdminApp() {
     setPage(session.role === "Kasir" ? "pos" : session.role === "Vendor" ? "kds" : "overview");
     reloadProducts(); reloadMerchants(); reloadExpenses();
     axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {});
+    axios.get(`${API}/settings/logo`).then(({ data }) => setBrandLogo(data?.logo_data || "")).catch(() => {});
     if (session.role === "Kasir") reloadShift();
     // Setup WebAudio chime
     chimeRef.current = () => {
@@ -171,7 +176,7 @@ function AdminApp() {
     <div className="app-shell" data-testid="mjd-kupi-app">
       <aside className={`sidebar ${sidebar ? "is-open" : ""}`} data-testid="main-sidebar">
         <div className="brand">
-          <div className="brand-mark"><Coffee size={19} /></div>
+          <div className="brand-mark" data-testid="brand-logo">{brandLogo ? <img src={brandLogo} alt="logo" /> : <Coffee size={19} />}</div>
           <div><strong>MJD Kupi</strong><span>Retail Command Center</span></div>
           <button className="mobile-close" data-testid="close-sidebar-button" onClick={() => setSidebar(false)}><X size={18} /></button>
         </div>
@@ -245,11 +250,12 @@ function AdminApp() {
           {page === "products" && <Products products={products} merchants={merchants} reload={reloadProducts} notify={notify} />}
           {page === "merchants" && <Merchants merchants={merchants} reload={reloadMerchants} notify={notify} />}
           {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} />}
+          {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} />}
           {page === "reports" && <Reports products={products} expenses={expenses} />}
           {page === "tables" && <Tables notify={notify} />}
           {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} />}
           {page === "vendor-center" && <VendorCenter notify={notify} />}
-          {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} />}
+          {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} role={session.role} />}
         </div>
       </main>
 
@@ -257,9 +263,9 @@ function AdminApp() {
       {showShiftOpen && <ShiftOpenModal onClose={() => setShowShiftOpen(false)} onOpened={(s) => { setShift(s); setShowShiftOpen(false); notify("Shift berhasil dibuka"); }} />}
       {showShiftClose && shift && <ShiftCloseModal shift={shift} onClose={() => setShowShiftClose(false)} onClosed={(rep) => { setShift(null); setShowShiftClose(false); setShiftReport(rep); notify(`Shift ditutup. Selisih ${money(rep.shift.variance)}`); }} />}
       {showPayment && <PaymentModal total={total} onClose={() => setShowPayment(false)} onConfirm={confirmSale} />}
-      {showReceipt && lastSale && <ReceiptModal sale={lastSale} merchants={merchants} onClose={() => { setShowReceipt(false); setLastSale(null); setCart([]); }} notify={notify} />}
+      {showReceipt && lastSale && <ReceiptModal sale={lastSale} merchants={merchants} outlets={outlets} cashier={session?.name || ""} onClose={() => { setShowReceipt(false); setLastSale(null); setCart([]); }} notify={notify} />}
       {showOnlineOrders && <OnlineOrdersModal orders={onlineOrders} onClose={() => setShowOnlineOrders(false)} reload={reloadOnlineOrders} notify={notify} onAcceptDone={() => reloadProducts()} />}
-      {shiftReport && <ShiftReportModal report={shiftReport} onClose={() => setShiftReport(null)} notify={notify} />}
+      {shiftReport && <ShiftReportModal report={shiftReport} outlets={outlets} onClose={() => setShiftReport(null)} notify={notify} />}
     </div>
   );
 }
@@ -425,7 +431,9 @@ function PaymentModal({ total, onClose, onConfirm }) {
 }
 
 // -------- Receipt Modal (with WA share + printer) --------
-function ReceiptModal({ sale, merchants, onClose, notify }) {
+function ReceiptModal({ sale, merchants, outlets, cashier, onClose, notify }) {
+  const [printing, setPrinting] = useState(false);
+  const outlet = outlets?.find((o) => o.id === (sale.outlet_id || "outlet-sudirman")) || { name: "MJD Kupi", address: "", phone: "" };
   const grouped = useMemo(() => {
     const g = {};
     (sale.lines || []).forEach((ln) => {
@@ -437,7 +445,7 @@ function ReceiptModal({ sale, merchants, onClose, notify }) {
   }, [sale, merchants]);
 
   const shareWA = (name, phone, lines) => {
-    const body = `🔔 [PESANAN BARU - MJD KUPI]\n${sale.table} | Order: #${String(sale.id).slice(-6)}\n` +
+    const body = `🔔 [PESANAN BARU - MJD KUPI]\n${sale.table || sale.table_no} | Order: #${String(sale.id).slice(-6)}\n` +
       lines.map((l) => `${l.quantity}× ${l.name}`).join("\n") +
       `\nTotal: ${money(lines.reduce((s, l) => s + l.price * l.quantity, 0))} | Status: DIBAYAR`;
     const url = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(body)}` : `https://wa.me/?text=${encodeURIComponent(body)}`;
@@ -445,11 +453,30 @@ function ReceiptModal({ sale, merchants, onClose, notify }) {
     notify(`WhatsApp ke ${name} disiapkan`);
   };
 
+  const printThermal = async () => {
+    setPrinting(true);
+    try {
+      const width = 32; // 58mm default
+      const salePayload = buildSaleReceipt({ outlet, sale, cashier: cashier || "-", width });
+      await directPrint(salePayload);
+      // Also print one kitchen ticket per merchant
+      for (const [_, g] of Object.entries(grouped)) {
+        const kb = buildKitchenTicket({ outlet, ticket: { source_id: sale.id, table_no: sale.table || sale.table_no, merchant_name: g.name, lines: g.lines }, width });
+        await directPrint(kb);
+      }
+      notify("Struk tercetak langsung ke printer thermal");
+    } catch (e) {
+      notify(e.message || "Gagal cetak. Sambungkan printer di menu Pengaturan.");
+    } finally {
+      setPrinting(false);
+    }
+  };
+
   return <div className="modal-backdrop">
     <div className="receipt-modal wide" data-testid="receipt-modal">
       <button className="modal-close" onClick={onClose} data-testid="close-receipt-button"><X size={18} /></button>
       <div className="receipt-logo"><Coffee size={17} /></div>
-      <h2>MJD Kupi</h2>
+      <h2>{outlet.name}</h2>
       <span>Struk #{String(sale.id).slice(-6)} · {sale.payment_method}</span>
       <div className="receipt-items">{(sale.lines || []).map((i, idx) => <div key={idx}><span>{i.quantity}× {i.name}</span><b>{money(i.price * i.quantity)}</b></div>)}</div>
       <div className="receipt-total"><span>Total dibayar</span><strong>{money(sale.total)}</strong></div>
@@ -465,7 +492,7 @@ function ReceiptModal({ sale, merchants, onClose, notify }) {
         ))}
       </div>
       <div className="split-actions">
-        <button className="outline-btn" onClick={() => window.print()} data-testid="print-receipt-button"><Printer size={14} /> Cetak struk</button>
+        <button className="outline-btn" disabled={printing} onClick={printThermal} data-testid="print-thermal-button"><Printer size={14} /> {printing ? "Mencetak..." : "Cetak Thermal"}</button>
         <button className="primary-btn" onClick={onClose} data-testid="finish-receipt-button">Selesai</button>
       </div>
     </div>
@@ -876,31 +903,165 @@ function VendorCenter({ notify }) {
   </>;
 }
 
-// -------- Settings (Printer + branding) --------
-function SettingsPage({ notify }) {
-  const [printer, setPrinter] = useState({ size: "58mm", auto_print: true, split_kitchen: true, device: "USB" });
-  useEffect(() => { axios.get(`${API}/settings/printer`).then(({ data }) => { if (data && Object.keys(data).length) setPrinter({ ...printer, ...data }); }).catch(() => {}); }, []);
-  const save = async () => { await axios.post(`${API}/settings`, { key: "printer", value: printer }); notify("Pengaturan printer tersimpan"); };
+// -------- Settings (Printer + Branding + Outlets, Super Admin only) --------
+function SettingsPage({ notify, role }) {
+  const [printer, setPrinter] = useState({ size: "58mm", auto_print: true, split_kitchen: true, device: "Bluetooth" });
+  const [logo, setLogo] = useState("");
+  const [outlets, setOutlets] = useState([]);
+  const [outletForm, setOutletForm] = useState({ name: "", address: "", phone: "" });
+  const [pairName, setPairName] = useState(pairedPrinterName());
+  const [connected, setConnected] = useState(isPrinterConnected());
+  const isSuper = role === "Super Admin";
+
+  const loadOutlets = () => axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {});
+  useEffect(() => {
+    axios.get(`${API}/settings/printer`).then(({ data }) => { if (data && Object.keys(data).length) setPrinter((p) => ({ ...p, ...data })); }).catch(() => {});
+    axios.get(`${API}/settings/logo`).then(({ data }) => setLogo(data?.logo_data || "")).catch(() => {});
+    loadOutlets();
+    const t = setInterval(() => setConnected(isPrinterConnected()), 2000);
+    return () => clearInterval(t);
+  }, []);
+
+  const savePrinter = async () => { await axios.post(`${API}/settings`, { key: "printer", value: printer }); notify("Pengaturan printer tersimpan"); };
+  const saveLogo = async (dataUrl) => { setLogo(dataUrl); await axios.post(`${API}/settings`, { key: "logo", value: { logo_data: dataUrl } }); notify("Logo diperbarui — akan muncul di navbar & struk"); };
+  const handleLogo = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => saveLogo(r.result); r.readAsDataURL(f); };
+  const pair = async () => { try { const { name } = await pairPrinter(); setPairName(name); setConnected(true); notify(`Printer "${name}" tersambung`); } catch (e) { notify(e.message || "Gagal sambung printer"); } };
+  const saveOutlet = async () => {
+    if (!outletForm.name) return notify("Nama outlet wajib");
+    try {
+      await axios.post(`${API}/outlets`, outletForm);
+      setOutletForm({ name: "", address: "", phone: "" }); loadOutlets(); notify("Outlet ditambahkan");
+    } catch (e) { notify(e.response?.data?.detail || "Gagal menambahkan outlet"); }
+  };
+  const deleteOutlet = async (id) => { if (!window.confirm("Hapus outlet ini?")) return; try { await axios.delete(`${API}/outlets/${id}`); loadOutlets(); notify("Outlet dihapus"); } catch (e) { notify(e.response?.data?.detail || "Gagal"); } };
+
   return <>
-    <SectionHeader eyebrow="OPERATIONS" title="Pengaturan" description="Konfigurasi printer thermal, split kitchen, dan branding." />
-    <section className="panel product-form">
-      <div className="form-heading"><div className="form-icon"><Printer size={18} /></div><div><h2>Printer thermal</h2><span>WebBluetooth / USB · 58mm atau 80mm</span></div></div>
-      <div className="form-fields">
-        <label>Ukuran kertas<select value={printer.size} onChange={(e) => setPrinter({ ...printer, size: e.target.value })} data-testid="printer-size-select"><option>58mm</option><option>80mm</option></select></label>
-        <label>Device<select value={printer.device} onChange={(e) => setPrinter({ ...printer, device: e.target.value })} data-testid="printer-device-select"><option>USB</option><option>Bluetooth</option><option>Network</option></select></label>
-        <label>Auto-print<select value={String(printer.auto_print)} onChange={(e) => setPrinter({ ...printer, auto_print: e.target.value === "true" })} data-testid="printer-auto-select"><option value="true">Aktif</option><option value="false">Nonaktif</option></select></label>
-        <label>Split kitchen<select value={String(printer.split_kitchen)} onChange={(e) => setPrinter({ ...printer, split_kitchen: e.target.value === "true" })} data-testid="printer-split-select"><option value="true">Per merchant</option><option value="false">Satu struk</option></select></label>
-        <button className="primary-btn" onClick={save} data-testid="save-printer-button">Simpan</button>
+    <SectionHeader eyebrow="OPERATIONS" title="Pengaturan Sistem" description="Printer thermal, branding, dan multi-outlet." />
+    <section className="panel product-form-v2">
+      <div className="form-heading"><div className="form-icon"><Bluetooth size={18} /></div>
+        <div><h2>Printer thermal (Web Bluetooth ESC/POS)</h2><span>{isPrinterSupported() ? "Chrome/Edge di HP atau desktop mendukung fitur ini" : "⚠️ Browser tidak mendukung Web Bluetooth"}</span></div>
+      </div>
+      <div className="form-fields" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
+        <label><span>Ukuran kertas</span><select value={printer.size} onChange={(e) => setPrinter({ ...printer, size: e.target.value })} data-testid="printer-size-select"><option>58mm</option><option>80mm</option></select></label>
+        <label><span>Device</span><select value={printer.device} onChange={(e) => setPrinter({ ...printer, device: e.target.value })} data-testid="printer-device-select"><option>Bluetooth</option><option>USB</option><option>Network</option></select></label>
+        <label><span>Auto-print</span><select value={String(printer.auto_print)} onChange={(e) => setPrinter({ ...printer, auto_print: e.target.value === "true" })} data-testid="printer-auto-select"><option value="true">Aktif</option><option value="false">Nonaktif</option></select></label>
+        <label><span>Split kitchen</span><select value={String(printer.split_kitchen)} onChange={(e) => setPrinter({ ...printer, split_kitchen: e.target.value === "true" })} data-testid="printer-split-select"><option value="true">Per merchant</option><option value="false">Satu struk</option></select></label>
+      </div>
+      <div className="printer-status-row">
+        <div className={`printer-status ${connected ? "on" : ""}`} data-testid="printer-status"><i /> {connected ? `Terhubung: ${pairName || "printer"}` : "Belum tersambung"}</div>
+        <div className="row-gap">
+          <button className="outline-btn" onClick={pair} data-testid="pair-printer-button"><Bluetooth size={14} /> Pair Bluetooth</button>
+          <button className="primary-btn" onClick={savePrinter} data-testid="save-printer-button"><Check size={14} /> Simpan pengaturan</button>
+        </div>
       </div>
     </section>
-    <section className="panel product-form">
-      <div className="form-heading"><div className="form-icon"><Coffee size={18} /></div><div><h2>Branding</h2><span>Logo & warna outlet</span></div></div>
-      <div className="form-fields">
-        <label>Nama outlet<input defaultValue="MJD Kupi" data-testid="brand-name-input" /></label>
-        <label>Warna aksen<input type="color" defaultValue="#f97316" data-testid="brand-color-input" /></label>
-        <button className="primary-btn" onClick={() => notify("Branding diperbarui")} data-testid="save-brand-button">Simpan</button>
+
+    {isSuper && <>
+      <section className="panel product-form-v2">
+        <div className="form-heading"><div className="form-icon"><ImageIcon size={18} /></div>
+          <div><h2>Logo usaha</h2><span>Otomatis muncul di Navbar, Dashboard, dan Struk Thermal</span></div>
+        </div>
+        <div className="brand-row">
+          <div className="brand-preview">
+            {logo ? <img src={logo} alt="logo" /> : <Coffee size={44} color="#f97316" />}
+          </div>
+          <div>
+            <label className="upload-btn" data-testid="upload-logo-label"><Upload size={14} /> Upload Logo PNG/JPG<input type="file" accept="image/*" onChange={handleLogo} style={{ display: "none" }} data-testid="logo-upload-input" /></label>
+            {logo && <button className="outline-btn" onClick={() => saveLogo("")} data-testid="remove-logo-button">Hapus logo</button>}
+          </div>
+        </div>
+      </section>
+
+      <section className="panel product-form-v2">
+        <div className="form-heading"><div className="form-icon"><Building2 size={18} /></div>
+          <div><h2>Manajemen Multi-Outlet</h2><span>Cabang / lokasi outlet (data muncul di struk)</span></div>
+        </div>
+        <div className="form-fields" style={{ gridTemplateColumns: "1.4fr 1.8fr 1fr auto" }}>
+          <label><span>Nama outlet</span><input value={outletForm.name} onChange={(e) => setOutletForm({ ...outletForm, name: e.target.value })} data-testid="outlet-name-input" /></label>
+          <label><span>Alamat</span><input value={outletForm.address} onChange={(e) => setOutletForm({ ...outletForm, address: e.target.value })} data-testid="outlet-address-input" /></label>
+          <label><span>No. Telp</span><input value={outletForm.phone} onChange={(e) => setOutletForm({ ...outletForm, phone: e.target.value })} data-testid="outlet-phone-input" /></label>
+          <button className="primary-btn" onClick={saveOutlet} data-testid="save-outlet-button"><Plus size={14} /> Tambah</button>
+        </div>
+        <div className="data-table" style={{ marginTop: 12 }}>
+          <div className="table-row outlet-row table-label"><span>Outlet</span><span>Alamat</span><span>Telp</span><span>Status</span><span /></div>
+          {outlets.map((o) => <div className="table-row outlet-row" key={o.id} data-testid={`outlet-row-${o.id}`}>
+            <span><b>{o.name}</b></span>
+            <span>{o.address || "-"}</span>
+            <span>{o.phone || "-"}</span>
+            <span><i className={`status-dot ${o.active ? "good" : "low"}`} />{o.active ? "Aktif" : "Nonaktif"}</span>
+            <button className="small-action" onClick={() => deleteOutlet(o.id)} data-testid={`delete-outlet-${o.id}`}><Trash2 size={12} /> Hapus</button>
+          </div>)}
+        </div>
+      </section>
+    </>}
+  </>;
+}
+
+// -------- User & Security Management (Super Admin ONLY) --------
+function UserManagement({ notify }) {
+  const [users, setUsers] = useState([]);
+  const [reveal, setReveal] = useState({});
+  const [form, setForm] = useState({ email: "", username: "", password: "", role: "Kasir", name: "", outlet_id: "outlet-sudirman", active: true });
+  const [showReset, setShowReset] = useState(null);
+  const [newPass, setNewPass] = useState("");
+  const load = () => axios.get(`${API}/admin/users`).then(({ data }) => setUsers(data)).catch(() => {});
+  useEffect(() => { load(); }, []);
+  const save = async () => {
+    if (!form.email || !form.password || !form.name) return notify("Email, password, nama wajib");
+    try { await axios.post(`${API}/admin/users`, form); setForm({ ...form, email: "", username: "", password: "", name: "" }); load(); notify("User berhasil dibuat"); }
+    catch (e) { notify(e.response?.data?.detail || "Gagal menambah user"); }
+  };
+  const reset = async () => {
+    if (!newPass) return notify("Password baru wajib diisi");
+    try { await axios.post(`${API}/admin/users/${showReset}/reset-password`, { new_password: newPass }); setShowReset(null); setNewPass(""); load(); notify("Password direset"); }
+    catch { notify("Gagal reset password"); }
+  };
+  const toggle = async (id) => { await axios.patch(`${API}/admin/users/${id}/toggle`); load(); };
+  const remove = async (u) => { if (!window.confirm(`Hapus user ${u.name}?`)) return; try { await axios.delete(`${API}/admin/users/${u.id}`); load(); notify("User dihapus"); } catch (e) { notify(e.response?.data?.detail || "Gagal"); } };
+  return <>
+    <SectionHeader eyebrow="SECURITY · SUPER ADMIN" title="Manajemen User & Security" description="Kelola akun, reset password, lihat kredensial semua user."
+      action={<div className="live-pill"><i /> {users.length} akun aktif</div>} />
+    <div className="panel product-form-v2">
+      <div className="form-heading"><div className="form-icon"><Shield size={18} /></div><div><h2>Tambah user baru</h2><span>Password akan disimpan agar Super Admin dapat memulihkannya</span></div></div>
+      <div className="form-fields" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr auto" }}>
+        <label><span>Nama</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="user-name-input" /></label>
+        <label><span>Username</span><input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="mis. kasir2" data-testid="user-username-input" /></label>
+        <label><span>Email</span><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} type="email" data-testid="user-email-input" /></label>
+        <label><span>Password</span><input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-testid="user-password-input" /></label>
+        <label><span>Role</span><select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} data-testid="user-role-select">{["Super Admin", "Admin", "Vendor", "Kasir"].map((r) => <option key={r}>{r}</option>)}</select></label>
+        <button className="primary-btn" onClick={save} data-testid="save-user-button"><Plus size={14} /> Simpan</button>
+      </div>
+    </div>
+    <section className="panel table-panel">
+      <div className="panel-head"><div><h2>Semua user</h2><span>Klik ikon mata untuk melihat password</span></div></div>
+      <div className="data-table">
+        <div className="table-row user-row table-label"><span>Nama</span><span>Username / Email</span><span>Role</span><span>Password</span><span>Status</span><span /></div>
+        {users.map((u) => <div className="table-row user-row" key={u.id} data-testid={`user-row-${u.id}`}>
+          <span className="table-product"><div className="product-dot" style={{ background: "#fff0e6" }}><UserCheck size={14} /></div><b>{u.name}</b></span>
+          <span className="mono-inline"><b>{u.username || "-"}</b><small>{u.email}</small></span>
+          <span><span className={`role-badge role-${u.role.toLowerCase().replaceAll(" ", "-")}`}>{u.role}</span></span>
+          <span className="pass-cell">
+            {reveal[u.id] ? <code data-testid={`user-pass-${u.id}`}>{u.plain_password || "(kosong)"}</code> : <code>••••••••</code>}
+            <button className="icon-btn" onClick={() => setReveal({ ...reveal, [u.id]: !reveal[u.id] })} data-testid={`toggle-pass-${u.id}`}>{reveal[u.id] ? <EyeOff size={13} /> : <Eye size={13} />}</button>
+          </span>
+          <span><i className={`status-dot ${u.active ? "good" : "low"}`} />{u.active ? "Aktif" : "Nonaktif"}</span>
+          <div className="row-gap">
+            <button className="small-action" onClick={() => setShowReset(u.id)} data-testid={`reset-user-${u.id}`}><RefreshCw size={11} /> Reset</button>
+            <button className="small-action" onClick={() => toggle(u.id)} data-testid={`toggle-user-${u.id}`}>{u.active ? "Off" : "On"}</button>
+            <button className="small-action" onClick={() => remove(u)} data-testid={`delete-user-${u.id}`}><Trash2 size={11} /></button>
+          </div>
+        </div>)}
       </div>
     </section>
+    {showReset && <div className="modal-backdrop"><div className="pay-modal">
+      <button className="modal-close" onClick={() => setShowReset(null)}><X size={18} /></button>
+      <div className="pay-head"><h2>Reset password</h2><span>Password akan digantikan segera</span></div>
+      <div className="pay-body">
+        <label>Password baru</label>
+        <input value={newPass} onChange={(e) => setNewPass(e.target.value)} data-testid="new-password-input" />
+      </div>
+      <button className="primary-btn full" onClick={reset} data-testid="confirm-reset-button"><Check size={14} /> Simpan password baru</button>
+    </div></div>}
   </>;
 }
 
@@ -944,8 +1105,10 @@ function ShiftCloseModal({ shift, onClose, onClosed }) {
 }
 
 // -------- Shift Report Modal (Print + WA share) --------
-function ShiftReportModal({ report, onClose, notify }) {
+function ShiftReportModal({ report, onClose, notify, outlets }) {
   const s = report.shift || {};
+  const [printing, setPrinting] = useState(false);
+  const outlet = outlets?.find((o) => o.id === (s.outlet_id || "outlet-sudirman")) || { name: "MJD Kupi", address: "", phone: "" };
   const fmt = (iso) => iso ? new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "-";
   const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString("id-ID", { year: "numeric", month: "2-digit", day: "2-digit" }).replaceAll("/", "") : "";
   const shiftId = `SHFT${fmtDate(s.opened_at)}_${(s.opened_at || "").slice(11, 16).replace(":", "")}`;
@@ -974,13 +1137,24 @@ function ShiftReportModal({ report, onClose, notify }) {
     "================================",
   ].join("\n");
   const shareWA = () => window.open(`https://wa.me/?text=${encodeURIComponent(lines)}`, "_blank");
-  const printReport = () => window.print();
+  const printReport = async () => {
+    setPrinting(true);
+    try {
+      const bytes = buildShiftReport({ outlet, report, width: 32 });
+      await directPrint(bytes);
+      notify("Laporan shift tercetak");
+    } catch (e) {
+      notify(e.message || "Sambungkan printer di Pengaturan lebih dulu");
+    } finally {
+      setPrinting(false);
+    }
+  };
   return <div className="modal-backdrop">
     <div className="shift-report-modal" data-testid="shift-report-modal">
       <button className="modal-close" onClick={onClose}><X size={18} /></button>
       <pre className="shift-slip" data-testid="shift-slip">{lines}</pre>
       <div className="shift-actions">
-        <button className="outline-btn" onClick={printReport} data-testid="shift-print-button"><Printer size={14}/> Printout struk</button>
+        <button className="outline-btn" disabled={printing} onClick={printReport} data-testid="shift-print-button"><Printer size={14}/> {printing ? "Mencetak..." : "Printout Struk"}</button>
         <button className="primary-btn" onClick={shareWA} data-testid="shift-wa-button"><MessageCircle size={14}/> Kirim ke WhatsApp</button>
       </div>
       <button className="text-btn" onClick={onClose} data-testid="shift-close-report-button">Tutup</button>
@@ -1135,8 +1309,8 @@ function CustomerSelfOrder() {
 
 // -------- Login --------
 function Login({ onLogin }) {
-  const [email, setEmail] = useState("manager@mjd-kupi.local");
-  const [password, setPassword] = useState("MjdKupi#2026");
+  const [email, setEmail] = useState("superadmin");
+  const [password, setPassword] = useState(".Superadmin1_");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async (event) => {
@@ -1154,17 +1328,17 @@ function Login({ onLogin }) {
     <form className="login-form" onSubmit={submit}>
       <div className="eyebrow">WELCOME BACK</div>
       <h2>Masuk ke workspace</h2>
-      <p>Gunakan akun role demo untuk mulai mengelola outlet.</p>
-      <label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" data-testid="login-email-input" /></label>
+      <p>Gunakan username atau email untuk login.</p>
+      <label>Username / Email<input value={email} onChange={(e) => setEmail(e.target.value)} data-testid="login-email-input" /></label>
       <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" data-testid="login-password-input" /></label>
       {error && <div className="login-error" data-testid="login-error">{error}</div>}
       <button className="primary-btn full" disabled={busy} data-testid="login-submit-button">{busy ? "Memeriksa…" : "Masuk ke MJD Kupi"}<span>→</span></button>
       <div className="demo-accounts">
         <b>Akun demo cepat</b>
-        <button type="button" onClick={() => setEmail("kasir@mjd-kupi.local")} data-testid="demo-kasir-button">Kasir</button>
-        <button type="button" onClick={() => setEmail("vendor@mjd-kupi.local")} data-testid="demo-vendor-button">Vendor</button>
-        <button type="button" onClick={() => setEmail("manager@mjd-kupi.local")} data-testid="demo-manager-button">Manager</button>
-        <button type="button" onClick={() => setEmail("superadmin@mjd-kupi.local")} data-testid="demo-admin-button">Super Admin</button>
+        <button type="button" onClick={() => { setEmail("superadmin"); setPassword(".Superadmin1_"); }} data-testid="demo-admin-button">Super Admin</button>
+        <button type="button" onClick={() => { setEmail("admin"); setPassword("MjdKupi#2026"); }} data-testid="demo-manager-button">Admin</button>
+        <button type="button" onClick={() => { setEmail("kasir"); setPassword("MjdKupi#2026"); }} data-testid="demo-kasir-button">Kasir</button>
+        <button type="button" onClick={() => { setEmail("vendor"); setPassword("MjdKupi#2026"); }} data-testid="demo-vendor-button">Vendor</button>
       </div>
     </form>
   </div>;

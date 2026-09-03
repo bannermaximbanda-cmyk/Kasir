@@ -108,6 +108,7 @@ class OutletInput(BaseModel):
     id: Optional[str] = None
     name: str
     address: str = ""
+    phone: str = ""
     active: bool = True
 
 
@@ -134,12 +135,13 @@ class KdsStatusInput(BaseModel):
 # Auth helpers
 # -----------------------------------------------------------------------------
 
-ROLES = ["Super Admin", "Merchant Admin", "Vendor", "Kasir"]
+ROLES = ["Super Admin", "Admin", "Vendor", "Kasir"]
 DEMO_USERS = [
-    ("superadmin@mjd-kupi.local", "MjdKupi#2026", "Super Admin", "Raka Owner"),
-    ("manager@mjd-kupi.local", "MjdKupi#2026", "Merchant Admin", "Maya Ardianti"),
-    ("vendor@mjd-kupi.local", "MjdKupi#2026", "Vendor", "Agus Tenant"),
-    ("kasir@mjd-kupi.local", "MjdKupi#2026", "Kasir", "Dina Kasir"),
+    # (email, username, password, role, name)
+    ("superadmin@mjd-kupi.local", "superadmin", ".Superadmin1_", "Super Admin", "Raka Owner"),
+    ("manager@mjd-kupi.local", "admin", "MjdKupi#2026", "Admin", "Maya Ardianti"),
+    ("vendor@mjd-kupi.local", "vendor", "MjdKupi#2026", "Vendor", "Agus Tenant"),
+    ("kasir@mjd-kupi.local", "kasir", "MjdKupi#2026", "Kasir", "Dina Kasir"),
 ]
 
 
@@ -147,6 +149,7 @@ def public_user(user: M.User) -> dict:
     return {
         "id": user.id,
         "email": user.email,
+        "username": user.username or "",
         "role": user.role,
         "name": user.name,
         "outlet_id": user.outlet_id or "outlet-sudirman",
@@ -211,10 +214,15 @@ async def root():
 
 @api_router.post("/auth/login")
 async def login(payload: LoginInput, response: Response, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(M.User).where(M.User.email == payload.email.lower()))
+    identifier = payload.email.lower().strip()
+    # Accept either email or username as identifier
+    q = select(M.User).where((M.User.email == identifier) | (M.User.username == identifier))
+    result = await db.execute(q)
     user = result.scalar_one_or_none()
     if not user or not bcrypt.checkpw(payload.password.encode(), user.password_hash.encode()):
-        raise HTTPException(status_code=401, detail="Email atau password salah")
+        raise HTTPException(status_code=401, detail="Email/username atau password salah")
+    if user.active is False:
+        raise HTTPException(status_code=403, detail="Akun dinonaktifkan")
     access = token_for(user)
     refresh = token_for(user, "refresh")
     cookie_kwargs = dict(httponly=True, secure=True, samesite="none")
@@ -258,6 +266,150 @@ async def create_outlet(
     return to_dict(outlet)
 
 
+@api_router.put("/outlets/{outlet_id}")
+async def update_outlet(
+    outlet_id: str,
+    payload: OutletInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    result = await db.execute(select(M.Outlet).where(M.Outlet.id == outlet_id))
+    outlet = result.scalar_one_or_none()
+    if not outlet:
+        raise HTTPException(status_code=404, detail="Outlet tidak ditemukan")
+    for field, value in payload.model_dump(exclude_unset=True, exclude={"id"}).items():
+        setattr(outlet, field, value)
+    await db.commit()
+    await db.refresh(outlet)
+    return to_dict(outlet)
+
+
+@api_router.delete("/outlets/{outlet_id}")
+async def delete_outlet(
+    outlet_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    result = await db.execute(select(M.Outlet).where(M.Outlet.id == outlet_id))
+    outlet = result.scalar_one_or_none()
+    if not outlet:
+        raise HTTPException(status_code=404, detail="Outlet tidak ditemukan")
+    await db.delete(outlet)
+    await db.commit()
+    return {"ok": True}
+
+
+# ---- User & Security management (Super Admin only) ----
+
+class UserInput(BaseModel):
+    email: str
+    username: str = ""
+    password: str
+    role: str
+    name: str
+    outlet_id: str = "outlet-sudirman"
+    active: bool = True
+
+
+class PasswordResetInput(BaseModel):
+    new_password: str
+
+
+@api_router.get("/admin/users")
+async def list_users(
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    result = await db.execute(select(M.User).order_by(M.User.created_at.desc()))
+    users = []
+    for u in result.scalars().all():
+        users.append({
+            "id": u.id,
+            "email": u.email,
+            "username": u.username or "",
+            "role": u.role,
+            "name": u.name,
+            "outlet_id": u.outlet_id or "",
+            "plain_password": u.plain_password or "",
+            "active": u.active if u.active is not None else True,
+            "created_at": u.created_at.isoformat() if u.created_at else "",
+        })
+    return users
+
+
+@api_router.post("/admin/users")
+async def create_user(
+    payload: UserInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    if payload.role not in ROLES:
+        raise HTTPException(status_code=400, detail=f"Role harus salah satu dari {ROLES}")
+    new_user = M.User(
+        email=payload.email.lower().strip(),
+        username=(payload.username or payload.email.split("@")[0]).lower().strip(),
+        password_hash=bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode(),
+        plain_password=payload.password,
+        role=payload.role,
+        name=payload.name,
+        outlet_id=payload.outlet_id,
+        active=payload.active,
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    return public_user(new_user)
+
+
+@api_router.post("/admin/users/{user_id}/reset-password")
+async def reset_password(
+    user_id: str,
+    payload: PasswordResetInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    result = await db.execute(select(M.User).where(M.User.id == user_id))
+    target = result.scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+    target.password_hash = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()
+    target.plain_password = payload.new_password
+    await db.commit()
+    return {"ok": True, "id": user_id}
+
+
+@api_router.patch("/admin/users/{user_id}/toggle")
+async def toggle_user(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    result = await db.execute(select(M.User).where(M.User.id == user_id))
+    target = result.scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+    target.active = not (target.active if target.active is not None else True)
+    await db.commit()
+    return {"ok": True, "active": target.active}
+
+
+@api_router.delete("/admin/users/{user_id}")
+async def delete_user(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    if user_id == user.id:
+        raise HTTPException(status_code=400, detail="Tidak bisa menghapus akun sendiri")
+    result = await db.execute(select(M.User).where(M.User.id == user_id))
+    target = result.scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+    await db.delete(target)
+    await db.commit()
+    return {"ok": True}
+
+
 # -----------------------------------------------------------------------------
 # Merchants
 # -----------------------------------------------------------------------------
@@ -272,7 +424,7 @@ async def list_merchants(db: AsyncSession = Depends(get_db)):
 async def create_merchant(
     payload: MerchantInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     merchant = M.Merchant(
         id=payload.id or str(uuid.uuid4()),
@@ -294,7 +446,7 @@ async def update_merchant(
     merchant_id: str,
     payload: MerchantInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     result = await db.execute(select(M.Merchant).where(M.Merchant.id == merchant_id))
     merchant = result.scalar_one_or_none()
@@ -343,7 +495,7 @@ async def list_products(db: AsyncSession = Depends(get_db)):
 async def create_product(
     payload: ProductInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     product = M.Product(
         id=payload.id or str(uuid.uuid4()),
@@ -369,7 +521,7 @@ async def update_product(
     product_id: str,
     payload: ProductInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     result = await db.execute(select(M.Product).where(M.Product.id == product_id))
     product = result.scalar_one_or_none()
@@ -386,7 +538,7 @@ async def update_product(
 async def delete_product(
     product_id: str,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     result = await db.execute(select(M.Product).where(M.Product.id == product_id))
     product = result.scalar_one_or_none()
@@ -445,8 +597,15 @@ async def list_expenses(db: AsyncSession = Depends(get_db), user: M.User = Depen
 async def create_expense(
     payload: ExpenseInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(current_user),
 ):
+    # Auto-bind kasir/admin session to prevent forgery
+    shift_id = None
+    if user.role == "Kasir":
+        r = await db.execute(select(M.Shift).where(M.Shift.cashier_id == user.id, M.Shift.status == "open"))
+        s = r.scalar_one_or_none()
+        if s:
+            shift_id = s.id
     expense = M.Expense(
         id=payload.id or str(uuid.uuid4()),
         category=payload.category,
@@ -454,6 +613,10 @@ async def create_expense(
         amount=payload.amount,
         date=payload.date,
         method=payload.method,
+        outlet_id=user.outlet_id or "outlet-sudirman",
+        user_id=user.id,
+        user_name=user.name,
+        shift_id=shift_id,
     )
     db.add(expense)
     await db.commit()
@@ -600,7 +763,7 @@ async def create_self_order(payload: SelfOrderInput, db: AsyncSession = Depends(
 async def accept_self_order(
     order_id: str,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Kasir", "Merchant Admin", "Super Admin")),
+    user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
 ):
     """Kasir menyetujui pesanan online: buat sale, kurangi stok, buat KDS tickets."""
     result = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
@@ -650,7 +813,7 @@ async def accept_self_order(
 @api_router.get("/vendor/orders")
 async def vendor_orders(
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Vendor", "Merchant Admin", "Super Admin")),
+    user: M.User = Depends(require_roles("Vendor", "Admin", "Super Admin")),
 ):
     result = await db.execute(select(M.SelfOrder).order_by(M.SelfOrder.created_at.desc()).limit(200))
     return [to_dict(row) for row in result.scalars().all()]
@@ -661,7 +824,7 @@ async def update_vendor_order(
     order_id: str,
     status: str,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Vendor", "Merchant Admin", "Super Admin")),
+    user: M.User = Depends(require_roles("Vendor", "Admin", "Super Admin")),
 ):
     result = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
     order = result.scalar_one_or_none()
@@ -675,7 +838,7 @@ async def update_vendor_order(
 @api_router.get("/vendor/settlement")
 async def vendor_settlement(
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Vendor", "Merchant Admin", "Super Admin")),
+    user: M.User = Depends(require_roles("Vendor", "Admin", "Super Admin")),
 ):
     total = (await db.execute(select(func.coalesce(func.sum(M.SelfOrder.total), 0)))).scalar_one()
     sales_total = (await db.execute(select(func.coalesce(func.sum(M.Sale.total), 0)))).scalar_one()
@@ -696,7 +859,7 @@ async def vendor_settlement(
 @api_router.get("/kds/orders")
 async def kds_orders(
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Vendor", "Merchant Admin", "Super Admin", "Kasir")),
+    user: M.User = Depends(require_roles("Vendor", "Admin", "Super Admin", "Kasir")),
 ):
     stmt = (
         select(M.KitchenOrder)
@@ -713,7 +876,7 @@ async def update_kds_status(
     ticket_id: str,
     payload: KdsStatusInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Vendor", "Merchant Admin", "Super Admin", "Kasir")),
+    user: M.User = Depends(require_roles("Vendor", "Admin", "Super Admin", "Kasir")),
 ):
     result = await db.execute(select(M.KitchenOrder).where(M.KitchenOrder.id == ticket_id))
     ticket = result.scalar_one_or_none()
@@ -798,7 +961,7 @@ async def close_shift(
 @api_router.get("/shifts")
 async def list_shifts(
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     result = await db.execute(select(M.Shift).order_by(M.Shift.opened_at.desc()).limit(50))
     shifts = [to_dict(row) for row in result.scalars().all()]
@@ -880,7 +1043,7 @@ async def shift_report(
 @api_router.get("/pos/online-orders")
 async def pos_online_orders(
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Kasir", "Merchant Admin", "Super Admin")),
+    user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
 ):
     """Antrean pesanan dari QR meja self-order yang belum di-approve kasir."""
     result = await db.execute(
@@ -907,7 +1070,7 @@ async def get_setting(key: str, db: AsyncSession = Depends(get_db)):
 async def upsert_setting(
     payload: SettingInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     result = await db.execute(select(M.Setting).where(M.Setting.key == payload.key))
     row = result.scalar_one_or_none()
@@ -930,7 +1093,7 @@ class QrisInput(BaseModel):
 async def save_qris(
     payload: QrisInput,
     db: AsyncSession = Depends(get_db),
-    user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     key = f"qris:{payload.outlet_id}"
     result = await db.execute(select(M.Setting).where(M.Setting.key == key))
@@ -974,6 +1137,14 @@ async def bootstrap():
             "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''",
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(32) DEFAULT ''",
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS payment_proof TEXT DEFAULT ''",
+            "ALTER TABLE mjd_users ADD COLUMN IF NOT EXISTS username VARCHAR(64) UNIQUE",
+            "ALTER TABLE mjd_users ADD COLUMN IF NOT EXISTS plain_password VARCHAR(255) DEFAULT ''",
+            "ALTER TABLE mjd_users ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE mjd_expenses ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
+            "ALTER TABLE mjd_expenses ADD COLUMN IF NOT EXISTS user_name VARCHAR(120) DEFAULT ''",
+            "ALTER TABLE mjd_expenses ADD COLUMN IF NOT EXISTS shift_id VARCHAR(36)",
+            "ALTER TABLE mjd_outlets ADD COLUMN IF NOT EXISTS phone VARCHAR(32) DEFAULT ''",
+            "UPDATE mjd_users SET role='Admin' WHERE role='Merchant Admin'",
         ):
             await conn.execute(text(stmt))
 
@@ -987,16 +1158,34 @@ async def bootstrap():
             ])
             await db.commit()
 
-        # Seed users
-        for email, password, role, name in DEMO_USERS:
+        # Seed users (with username & plain_password)
+        for email, username, password, role, name in DEMO_USERS:
             result = await db.execute(select(M.User).where(M.User.email == email))
-            if not result.scalar_one_or_none():
+            existing = result.scalar_one_or_none()
+            if not existing:
                 db.add(M.User(
                     email=email,
+                    username=username,
                     password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
+                    plain_password=password,
                     role=role,
                     name=name,
+                    active=True,
                 ))
+            else:
+                # Backfill username/plain_password for existing users
+                changed = False
+                if not existing.username:
+                    existing.username = username; changed = True
+                if not existing.plain_password:
+                    existing.plain_password = password; changed = True
+                # Also rotate super admin password to new spec
+                if username == "superadmin" and not bcrypt.checkpw(password.encode(), existing.password_hash.encode()):
+                    existing.password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+                    existing.plain_password = password
+                    changed = True
+                if changed:
+                    pass
         await db.commit()
 
         # Seed merchants
