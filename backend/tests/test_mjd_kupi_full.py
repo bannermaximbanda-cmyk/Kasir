@@ -269,25 +269,210 @@ class TestShiftPosKds:
 # Self order (no auth)
 # ---------------------------------------------------------------------------
 class TestSelfOrder:
-    def test_self_order_creates_kitchen_tickets_and_vendor_sees(self, vendor_client):
+    def test_self_order_no_auto_kds_but_visible_to_vendor(self, vendor_client):
+        """Iterasi 6: self-order TIDAK LAGI auto-create KDS tickets."""
         products = requests.get(f"{API}/products", timeout=30).json()
         p = products[0]
         payload = {"table": "TEST_SELF",
                    "lines": [{"product_id": p["id"], "name": p["name"], "quantity": 2,
                               "price": p["price"], "vendor": p.get("vendor", ""),
                               "merchant_id": p.get("merchant_id")}],
-                   "total": p["price"] * 2, "notes": "TEST self order"}
+                   "total": p["price"] * 2, "notes": "TEST self order",
+                   "payment_method": "QRIS", "payment_proof": "data:image/png;base64,AAA"}
         r = requests.post(f"{API}/self-order", json=payload, timeout=30)
         assert r.status_code == 200, r.text
-        order_id = r.json()["id"]
+        order = r.json()
+        order_id = order["id"]
+        assert order.get("payment_method") == "QRIS"
+        assert order.get("payment_proof", "").startswith("data:image")
 
-        # KDS should have ticket referencing this self order
+        # KDS should NOT have any ticket referencing this self order yet
         tickets = vendor_client.get(f"{API}/kds/orders", timeout=30).json()
-        assert any(t["source_id"] == order_id and t["source_type"] == "self" for t in tickets)
+        assert not any(t["source_id"] == order_id for t in tickets), \
+            "Self-order tidak boleh auto-create KDS ticket"
 
-        # vendor listing
+        # vendor listing tetap melihat order
         orders = vendor_client.get(f"{API}/vendor/orders", timeout=30).json()
         assert any(o["id"] == order_id for o in orders)
+
+
+# ---------------------------------------------------------------------------
+# Iterasi 6: Cashier Monitoring, Shift Report, Online Orders, Accept
+# ---------------------------------------------------------------------------
+def _ensure_no_shift(client):
+    cur = client.get(f"{API}/shifts/current", timeout=30).json()
+    if cur:
+        client.post(f"{API}/shifts/close", json={"closing_cash": cur["opening_cash"]}, timeout=30)
+
+
+class TestCashierMonitoring:
+    def test_list_shifts_admin_enriched(self, admin_client):
+        r = admin_client.get(f"{API}/shifts", timeout=30)
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert isinstance(data, list)
+        if data:
+            for s in data[:3]:
+                assert "total_cash" in s
+                assert "total_transfer" in s
+                assert "transaction_count" in s
+
+    def test_list_shifts_super_ok(self, super_client):
+        r = super_client.get(f"{API}/shifts", timeout=30)
+        assert r.status_code == 200
+
+    def test_list_shifts_kasir_forbidden(self, kasir_client):
+        r = kasir_client.get(f"{API}/shifts", timeout=30)
+        assert r.status_code == 403
+
+    def test_list_shifts_vendor_forbidden(self, vendor_client):
+        r = vendor_client.get(f"{API}/shifts", timeout=30)
+        assert r.status_code == 403
+
+
+class TestShiftReport:
+    def test_shift_report_structure_for_kasir_own_shift(self, kasir_client):
+        _ensure_no_shift(kasir_client)
+        r = kasir_client.post(f"{API}/shifts/open", json={"opening_cash": 50000}, timeout=30)
+        assert r.status_code == 200
+        shift_id = r.json()["id"]
+        rr = kasir_client.get(f"{API}/shifts/{shift_id}/report", timeout=30)
+        assert rr.status_code == 200, rr.text
+        rep = rr.json()
+        for f in ["shift", "cashier_name", "total_cash", "total_transfer",
+                  "total_omset", "tables_paid", "tables_pending",
+                  "unpaid_total", "expenses_total", "transaction_count",
+                  "per_merchant"]:
+            assert f in rep, f"missing field {f}"
+        assert isinstance(rep["per_merchant"], dict)
+        # cleanup
+        kasir_client.post(f"{API}/shifts/close", json={"closing_cash": 50000}, timeout=30)
+
+    def test_kasir_forbidden_other_shift(self, admin_client, kasir_client):
+        # find a shift not belonging to kasir
+        shifts = admin_client.get(f"{API}/shifts", timeout=30).json()
+        me = kasir_client.get(f"{API}/auth/me", timeout=30).json()
+        other = next((s for s in shifts if s.get("cashier_id") != me["id"]), None)
+        if not other:
+            pytest.skip("no other-cashier shift available")
+        r = kasir_client.get(f"{API}/shifts/{other['id']}/report", timeout=30)
+        assert r.status_code == 403
+
+
+class TestOnlineOrdersAndAccept:
+    def _create_self_order(self):
+        products = requests.get(f"{API}/products", timeout=30).json()
+        p = products[0]
+        payload = {"table": "TEST_ON",
+                   "lines": [{"product_id": p["id"], "name": p["name"], "quantity": 1,
+                              "price": p["price"], "vendor": p.get("vendor", ""),
+                              "merchant_id": p.get("merchant_id")}],
+                   "total": p["price"], "notes": "TEST online",
+                   "payment_method": "QRIS", "payment_proof": "x"}
+        r = requests.post(f"{API}/self-order", json=payload, timeout=30)
+        assert r.status_code == 200
+        return r.json(), p
+
+    def test_online_orders_kasir_sees_pending(self, kasir_client):
+        order, _ = self._create_self_order()
+        r = kasir_client.get(f"{API}/pos/online-orders", timeout=30)
+        assert r.status_code == 200
+        ids = [o["id"] for o in r.json()]
+        assert order["id"] in ids
+
+    def test_online_orders_vendor_forbidden(self, vendor_client):
+        r = vendor_client.get(f"{API}/pos/online-orders", timeout=30)
+        assert r.status_code == 403
+
+    def test_accept_self_order_creates_sale_and_reduces_stock(self, kasir_client):
+        _ensure_no_shift(kasir_client)
+        kasir_client.post(f"{API}/shifts/open", json={"opening_cash": 0}, timeout=30)
+        order, product = self._create_self_order()
+        pre_stock = requests.get(f"{API}/products", timeout=30).json()
+        pre = next(x for x in pre_stock if x["id"] == product["id"])["stock"]
+
+        r = kasir_client.post(f"{API}/self-order/{order['id']}/accept", timeout=30)
+        assert r.status_code == 200, r.text
+        sale = r.json()
+        assert sale["table_no"] == order["table_no"]
+
+        # Stock reduced
+        after = requests.get(f"{API}/products", timeout=30).json()
+        post = next(x for x in after if x["id"] == product["id"])["stock"]
+        assert post == pre - 1
+
+        # No longer in online-orders queue
+        pending = kasir_client.get(f"{API}/pos/online-orders", timeout=30).json()
+        assert order["id"] not in [o["id"] for o in pending]
+
+        # KDS tickets created
+        tickets = kasir_client.get(f"{API}/kds/orders", timeout=30).json()
+        assert any(t["source_id"] == sale["id"] for t in tickets)
+
+        # Re-accept returns 400
+        r2 = kasir_client.post(f"{API}/self-order/{order['id']}/accept", timeout=30)
+        assert r2.status_code == 400
+
+        # cleanup shift
+        kasir_client.post(f"{API}/shifts/close", json={"closing_cash": 0}, timeout=30)
+
+    def test_accept_requires_shift(self, kasir_client):
+        _ensure_no_shift(kasir_client)
+        order, _ = self._create_self_order()
+        r = kasir_client.post(f"{API}/self-order/{order['id']}/accept", timeout=30)
+        assert r.status_code == 400
+        assert "shift" in r.json()["detail"].lower()
+
+
+class TestSalesDataIsolation:
+    def test_kasir_sees_only_own_shift_sales(self, kasir_client):
+        _ensure_no_shift(kasir_client)
+        # Without shift -> empty
+        r = kasir_client.get(f"{API}/sales", timeout=30)
+        assert r.status_code == 200
+        assert r.json() == []
+
+        # Open shift and create sale
+        kasir_client.post(f"{API}/shifts/open", json={"opening_cash": 0}, timeout=30)
+        products = requests.get(f"{API}/products", timeout=30).json()
+        p = products[0]
+        payload = {"table": "TEST_ISO",
+                   "lines": [{"product_id": p["id"], "name": p["name"], "quantity": 1,
+                              "price": p["price"], "vendor": p.get("vendor", ""),
+                              "merchant_id": p.get("merchant_id")}],
+                   "subtotal": p["price"], "tax": 0, "total": p["price"],
+                   "payment_method": "Cash", "cash_received": p["price"],
+                   "change_amount": 0}
+        sr = kasir_client.post(f"{API}/sales", json=payload, timeout=30)
+        assert sr.status_code == 200
+        sid = sr.json()["id"]
+        cur = kasir_client.get(f"{API}/shifts/current", timeout=30).json()
+        listing = kasir_client.get(f"{API}/sales", timeout=30).json()
+        assert all(s.get("shift_id") == cur["id"] for s in listing)
+        assert any(s["id"] == sid for s in listing)
+        kasir_client.post(f"{API}/shifts/close", json={"closing_cash": p["price"]}, timeout=30)
+
+
+class TestProductImageUrl:
+    def test_create_product_with_image_url(self, admin_client):
+        merchants = requests.get(f"{API}/merchants", timeout=30).json()
+        mid = merchants[0]["id"]
+        payload = {
+            "name": f"TEST_Prod_{uuid.uuid4().hex[:6]}",
+            "category": "TEST", "vendor": "TEST", "merchant_id": mid,
+            "price": 10000, "stock": 5,
+            "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+        }
+        r = admin_client.post(f"{API}/products", json=payload, timeout=30)
+        assert r.status_code == 200, r.text
+        prod = r.json()
+        assert prod["image_url"].startswith("data:image")
+        pid = prod["id"]
+        listing = requests.get(f"{API}/products", timeout=30).json()
+        found = next((p for p in listing if p["id"] == pid), None)
+        assert found and found["image_url"].startswith("data:image")
+        # cleanup
+        admin_client.delete(f"{API}/products/{pid}", timeout=30)
 
 
 # ---------------------------------------------------------------------------

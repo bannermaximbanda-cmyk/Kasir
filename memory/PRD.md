@@ -27,28 +27,37 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 
 ## Implemented (Feb 2026, this session)
 - [x] Migrasi lengkap MongoDB → Supabase Postgres (SQLAlchemy async + asyncpg, statement_cache_size=0)
-- [x] Model DB: users, outlets, merchants, products, stock_logs, expenses, sales, self_orders, kitchen_orders, shifts, settings
+- [x] Model DB: users, outlets, merchants, products (+ image_url), stock_logs, expenses, sales, self_orders (+ payment_method + payment_proof), kitchen_orders, shifts, settings
 - [x] Auth 4 role + JWT cookie + bearer
 - [x] Merchant CRUD (RBAC-gated) + sinkron ke produk vendor
-- [x] Product CRUD (bind ke merchant_id + delete)
-- [x] Inventory: Barang Masuk / Keluar / Opname (stock_logs terpisah)
+- [x] Product CRUD dengan upload gambar (base64 data URL)
+- [x] Inventory: Barang Masuk / Keluar / Opname
 - [x] Expenses CRUD dengan kategori & metode
-- [x] POS multi-channel payment (Cash + kembalian, Transfer + ref, QRIS dinamis)
-- [x] Kasir shift open/close + variance kalkulasi otomatis (opening + cash_sales vs closing)
-- [x] Kitchen Display System (KDS) live, polling 3s, SLA hijau/kuning/merah, chime WebAudio, status Diproses → Siap → Selesai
+- [x] POS multi-channel payment (Cash + kembalian, Transfer + ref, QRIS QR asli + upload bukti)
+- [x] Kasir shift open/close + variance kalkulasi otomatis
+- [x] Modal Rekap Shift lengkap format receipt style + tombol Print + Kirim WhatsApp
+- [x] Monitoring Kasir (Admin): list shift real-time dengan total_cash, total_transfer, transaction_count
+- [x] Data isolation kasir: GET /api/sales hanya returns shift aktif si kasir
+- [x] Kitchen Display System live 3s polling + SLA color coding + chime WebAudio
+- [x] Real QR Code (qrcode.react QRCodeSVG) untuk QR Meja pelanggan (URL /self-order?table=NN)
+- [x] Customer public route /self-order (no auth) dengan checkout + QRIS asli + upload bukti
+- [x] Menu Pesanan Online di POS: badge notifikasi + modal setujui + auto stock deduction + KDS tickets
+- [x] Kitchen tickets split per merchant otomatis saat kasir approve/POS sale
 - [x] Receipt modal dengan split kitchen ticket + WhatsApp share (wa.me) per merchant + tombol cetak
-- [x] Self-service QR (tanpa auth) + auto kitchen ticket
-- [x] Printer settings (58/80mm, USB/BT/Network, auto-print, split kitchen) tersimpan di Supabase
+- [x] Self-service QR + auto flow ke antrean POS kasir
+- [x] Printer settings (58/80mm, USB/BT/Network, auto-print, split kitchen)
 - [x] Laporan P&L Statement + Export CSV
 - [x] Seed otomatis: 4 merchants, 6 products, 4 demo users, 2 outlets, 2 expenses
-- [x] Test coverage: 18/18 backend pytest passed, 100% frontend flows validated
+- [x] Test coverage: 29/29 backend pytest (iterasi 6), 100% frontend flows
 
 ## Backlog (P1/P2)
-- P1: Optimistic banner update on shift-open (currently waits for next 3s poll)
-- P1: Refactor server.py (889 lines) into router modules
-- P1: Real QRIS payment gateway integration (Xendit / Midtrans)
-- P1: Real thermal printer driver (Web Bluetooth / ESC-POS)
+- P1: Optimistic shift banner update (currently waits for 3s poll)
+- P1: Refactor server.py (1049 lines) into router modules (auth/pos/kds/shifts/settings)
+- P1: Refactor App.js (1171 lines) — extract komponen ke src/pages
+- P1: Real QRIS payment gateway integration (Xendit / Midtrans dengan verifikasi otomatis)
+- P1: Real thermal printer driver (Web Bluetooth / ESC-POS commands)
+- P1: Shift report scope date range (currently includes semua expense/pending)
 - P2: Alembic migrations replacing metadata.create_all
-- P2: Supabase Realtime channels (currently polling)
+- P2: Supabase Realtime channels (ganti polling)
 - P2: Loyalty / member program
 - P2: E-invoice / faktur pajak

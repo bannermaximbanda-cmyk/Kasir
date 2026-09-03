@@ -1,21 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
+import { QRCodeSVG, QRCodeCanvas } from "qrcode.react";
 import {
   BarChart3, Bell, ChefHat, ChevronDown, ClipboardList, Coffee, CreditCard,
   Database, DollarSign, FileText, Grid2X2, LogOut, Menu, Package, Plus,
   Printer, QrCode, Receipt, Search, Settings2, ShoppingCart, Store, Timer,
   Trash2, Users, Wallet, X, Building2, Volume2, MessageCircle, PlayCircle,
-  StopCircle,
+  StopCircle, UserCheck, Upload, Image as ImageIcon, Check, Copy,
 } from "lucide-react";
 import "@/App.css";
 
 const money = (n) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
 axios.defaults.withCredentials = true;
 
 const NAV_BY_ROLE = {
-  "Super Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "reports", "tables", "self-service", "vendor-center", "settings"],
-  "Merchant Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "reports", "tables", "self-service", "vendor-center", "settings"],
+  "Super Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "settings"],
+  "Merchant Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "settings"],
   Vendor: ["kds", "vendor-center", "self-service"],
   Kasir: ["pos", "kds", "self-service"],
 };
@@ -27,6 +29,7 @@ const NAV_ITEMS = [
   { id: "expenses", label: "Pengeluaran", icon: Wallet },
   { id: "products", label: "Produk & HPP", icon: ClipboardList },
   { id: "merchants", label: "Merchant / Tenant", icon: Store },
+  { id: "cashiers", label: "Monitoring Kasir", icon: UserCheck },
   { id: "reports", label: "Laporan Keuangan", icon: FileText },
   { id: "tables", label: "QR Meja", icon: Grid2X2 },
   { id: "self-service", label: "Self-Service", icon: QrCode },
@@ -35,6 +38,14 @@ const NAV_ITEMS = [
 ];
 
 export default function App() {
+  // Public route: /self-order?table=NN (customer QR scan)
+  if (typeof window !== "undefined" && window.location.pathname === "/self-order") {
+    return <CustomerSelfOrder />;
+  }
+  return <AdminApp />;
+}
+
+function AdminApp() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [page, setPage] = useState("overview");
@@ -54,6 +65,11 @@ export default function App() {
   const [showPayment, setShowPayment] = useState(false);
   const [lastSale, setLastSale] = useState(null);
   const [showReceipt, setShowReceipt] = useState(false);
+  const [onlineOrders, setOnlineOrders] = useState([]);
+  const [showOnlineOrders, setShowOnlineOrders] = useState(false);
+  const [shiftReport, setShiftReport] = useState(null);
+  const prevOnlineIdsRef = useRef(new Set());
+  const chimeRef = useRef(null);
   const printerRef = useRef(null);
 
   const notify = (text) => { setToast(text); window.setTimeout(() => setToast(""), 2500); };
@@ -64,6 +80,17 @@ export default function App() {
   const reloadMerchants = () => axios.get(`${API}/merchants`).then(({ data }) => setMerchants(data)).catch(() => {});
   const reloadExpenses = () => axios.get(`${API}/expenses`).then(({ data }) => setExpenses(data)).catch(() => {});
   const reloadShift = () => axios.get(`${API}/shifts/current`).then(({ data }) => setShift(data)).catch(() => setShift(null));
+  const reloadOnlineOrders = async () => {
+    try {
+      const { data } = await axios.get(`${API}/pos/online-orders`);
+      const ids = new Set(data.map((o) => o.id));
+      const prev = prevOnlineIdsRef.current;
+      const hasNew = prev.size > 0 && [...ids].some((id) => !prev.has(id));
+      if (hasNew && chimeRef.current) chimeRef.current();
+      prevOnlineIdsRef.current = ids;
+      setOnlineOrders(data);
+    } catch {}
+  };
 
   useEffect(() => {
     axios.get(`${API}/auth/me`).then(({ data }) => setSession(data)).catch(() => {}).finally(() => setAuthLoading(false));
@@ -74,6 +101,23 @@ export default function App() {
     reloadProducts(); reloadMerchants(); reloadExpenses();
     axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {});
     if (session.role === "Kasir") reloadShift();
+    // Setup WebAudio chime
+    chimeRef.current = () => {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ctx.createOscillator(); const g = ctx.createGain();
+        o.type = "sine"; o.frequency.value = 1200; g.gain.value = 0.18;
+        o.connect(g).connect(ctx.destination); o.start();
+        setTimeout(() => { o.frequency.value = 880; }, 130);
+        setTimeout(() => { o.stop(); ctx.close(); }, 380);
+      } catch {}
+    };
+    // Poll online orders only for cashier/admin
+    if (["Kasir", "Merchant Admin", "Super Admin"].includes(session.role)) {
+      reloadOnlineOrders();
+      const t = setInterval(reloadOnlineOrders, 4000);
+      return () => clearInterval(t);
+    }
   }, [session]);
 
   const filtered = useMemo(
@@ -192,13 +236,15 @@ export default function App() {
           {page === "pos" && (
             <POS products={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory}
                  cart={cart} addToCart={addToCart} adjustCart={adjustCart} subtotal={subtotal} tax={tax} total={total}
-                 onPay={openPayment} shift={shift} role={session.role} />
+                 onPay={openPayment} shift={shift} role={session.role}
+                 onlineOrders={onlineOrders} openOnline={() => setShowOnlineOrders(true)} />
           )}
           {page === "kds" && <KDS notify={notify} merchants={merchants} />}
           {page === "inventory" && <Inventory products={products} reload={reloadProducts} notify={notify} />}
           {page === "expenses" && <Expenses expenses={expenses} reload={reloadExpenses} notify={notify} />}
           {page === "products" && <Products products={products} merchants={merchants} reload={reloadProducts} notify={notify} />}
           {page === "merchants" && <Merchants merchants={merchants} reload={reloadMerchants} notify={notify} />}
+          {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} />}
           {page === "reports" && <Reports products={products} expenses={expenses} />}
           {page === "tables" && <Tables notify={notify} />}
           {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} />}
@@ -209,9 +255,11 @@ export default function App() {
 
       {toast && <div className="toast" data-testid="toast-message"><span>✓</span>{toast}</div>}
       {showShiftOpen && <ShiftOpenModal onClose={() => setShowShiftOpen(false)} onOpened={(s) => { setShift(s); setShowShiftOpen(false); notify("Shift berhasil dibuka"); }} />}
-      {showShiftClose && shift && <ShiftCloseModal shift={shift} onClose={() => setShowShiftClose(false)} onClosed={(s) => { setShift(null); setShowShiftClose(false); notify(`Shift ditutup. Selisih ${money(s.variance)}`); }} />}
+      {showShiftClose && shift && <ShiftCloseModal shift={shift} onClose={() => setShowShiftClose(false)} onClosed={(rep) => { setShift(null); setShowShiftClose(false); setShiftReport(rep); notify(`Shift ditutup. Selisih ${money(rep.shift.variance)}`); }} />}
       {showPayment && <PaymentModal total={total} onClose={() => setShowPayment(false)} onConfirm={confirmSale} />}
       {showReceipt && lastSale && <ReceiptModal sale={lastSale} merchants={merchants} onClose={() => { setShowReceipt(false); setLastSale(null); setCart([]); }} notify={notify} />}
+      {showOnlineOrders && <OnlineOrdersModal orders={onlineOrders} onClose={() => setShowOnlineOrders(false)} reload={reloadOnlineOrders} notify={notify} onAcceptDone={() => reloadProducts()} />}
+      {shiftReport && <ShiftReportModal report={shiftReport} onClose={() => setShiftReport(null)} notify={notify} />}
     </div>
   );
 }
@@ -272,11 +320,17 @@ function Overview({ products, expenses, setPage }) {
 }
 
 // -------- POS --------
-function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, onPay, shift, role }) {
+function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, onPay, shift, role, onlineOrders, openOnline }) {
   return <>
     <SectionHeader eyebrow={shift ? `SHIFT AKTIF · Kas awal ${money(shift.opening_cash)}` : "TERMINAL KASIR"} title="Pesanan baru"
       description="Pilih menu, atur jumlah, lalu selesaikan pembayaran."
-      action={<div className="live-pill"><i /> Terminal online</div>} />
+      action={<div className="pos-actions">
+        <button className={`online-btn ${(onlineOrders?.length || 0) > 0 ? "has-new" : ""}`} onClick={openOnline} data-testid="online-orders-button">
+          <QrCode size={15} /> Pesanan Online
+          {(onlineOrders?.length || 0) > 0 && <span className="badge">{onlineOrders.length}</span>}
+        </button>
+        <div className="live-pill"><i /> Terminal online</div>
+      </div>} />
     {role === "Kasir" && !shift && <div className="warn-banner" data-testid="pos-shift-warning">⚠️ Shift belum dibuka. Klik "Buka Shift" di sidebar untuk mulai bertransaksi.</div>}
     <div className="pos-layout">
       <section className="menu-area">
@@ -286,7 +340,7 @@ function POS({ products, query, setQuery, category, setCategory, cart, addToCart
         </div>
         <div className="product-grid">
           {products.map((p) => <button className="product-card" key={p.id} onClick={() => addToCart(p)} data-testid={`product-card-${p.id}`}>
-            <div className="product-art" style={{ background: p.color }}><Coffee size={30} /><span>{p.stock} stok</span></div>
+            <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={30} />}<span>{p.stock} stok</span></div>
             <div className="product-info"><b>{p.name}</b><span>{p.vendor}</span><strong>{money(p.price)}</strong></div>
             <div className="add-product"><Plus size={17} /></div>
           </button>)}
@@ -327,8 +381,13 @@ function PaymentModal({ total, onClose, onConfirm }) {
   const [method, setMethod] = useState("Cash");
   const [cash, setCash] = useState(total);
   const [ref, setRef] = useState("");
+  const [proofData, setProofData] = useState("");
+  const [qrisCode, setQrisCode] = useState("");
+  useEffect(() => { axios.get(`${API}/settings/qris:outlet-sudirman`).then(({ data }) => setQrisCode(data?.qris_code || "")).catch(() => {}); }, []);
   const change = Math.max(0, Number(cash) - total);
-  const canPay = method === "Cash" ? Number(cash) >= total : method === "Transfer" ? ref.length > 3 : true;
+  const canPay = method === "Cash" ? Number(cash) >= total : method === "Transfer" ? ref.length > 3 : (ref.length > 3 || proofData);
+  const qrPayload = qrisCode || `MJDKUPI|AMOUNT:${total}|TS:${Date.now()}`;
+  const handleFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setProofData(r.result); r.readAsDataURL(f); };
   return <div className="modal-backdrop">
     <div className="pay-modal" data-testid="payment-modal">
       <button className="modal-close" onClick={onClose} data-testid="close-payment-button"><X size={18} /></button>
@@ -349,13 +408,18 @@ function PaymentModal({ total, onClose, onConfirm }) {
       {method === "Transfer" && <div className="pay-body">
         <label>Nomor referensi / rekening pengirim</label>
         <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="Contoh: BCA-4823" data-testid="transfer-ref-input" />
-        <div className="hint">Konfirmasi transfer sebelum menyelesaikan pembayaran.</div>
+        <div className="hint">Rekening MJD Kupi · BCA 4823-0011 a.n. MJD Kupi. Konfirmasi transfer sebelum menyelesaikan.</div>
       </div>}
       {method === "QRIS" && <div className="pay-body qris-body">
-        <div className="qris-box"><QrCode size={140} /></div>
-        <div className="hint">Scan QRIS dinamis di atas untuk membayar {money(total)}. Tekan Konfirmasi setelah transaksi berhasil.</div>
+        <div className="qris-real" data-testid="qris-real"><QRCodeSVG value={qrPayload} size={180} bgColor="#ffffff" fgColor="#111827" level="M" includeMargin={true} /></div>
+        <div className="hint">Scan QRIS di atas dengan m-banking / e-wallet untuk membayar {money(total)}.</div>
+        <label>Nomor referensi (opsional)</label>
+        <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="ID transaksi QRIS" data-testid="qris-ref-input" />
+        <label>Upload bukti pembayaran</label>
+        <input type="file" accept="image/*" onChange={handleFile} data-testid="qris-proof-input" />
+        {proofData && <div className="proof-thumb"><img src={proofData} alt="Bukti" /><Check size={16} color="#059669" /></div>}
       </div>}
-      <button className="primary-btn full" disabled={!canPay} onClick={() => onConfirm({ method, reference: ref, cashReceived: cash })} data-testid="confirm-payment-button">Konfirmasi pembayaran <span>→</span></button>
+      <button className="primary-btn full" disabled={!canPay} onClick={() => onConfirm({ method, reference: ref || proofData.slice(0, 60), cashReceived: cash })} data-testid="confirm-payment-button">Konfirmasi pembayaran <span>→</span></button>
     </div>
   </div>;
 }
@@ -598,33 +662,42 @@ function ExpenseModal({ onClose, onSaved }) {
 
 // -------- Products --------
 function Products({ products, merchants, reload, notify }) {
-  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: 0, cost: 0, stock: 0, color: "#ffedd5" });
+  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: 0, cost: 0, stock: 0, color: "#ffedd5", image_url: "" });
   useEffect(() => { if (!form.merchant_id && merchants.length) setForm((f) => ({ ...f, merchant_id: merchants[0].id })); }, [merchants]);
   const save = async () => {
     if (!form.name) return notify("Nama produk wajib diisi");
     const vendor = merchants.find((m) => m.id === form.merchant_id)?.name || "MJD Kupi";
     await axios.post(`${API}/products`, { ...form, vendor });
-    setForm({ ...form, name: "", price: 0, cost: 0, stock: 0 });
+    setForm({ ...form, name: "", price: 0, cost: 0, stock: 0, image_url: "" });
     reload(); notify("Produk berhasil ditambahkan");
   };
+  const handleImage = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setForm({ ...form, image_url: r.result }); r.readAsDataURL(f); };
   return <>
     <SectionHeader eyebrow="CATALOG & COSTING" title="Produk & HPP" description="Bangun katalog menu dan jaga margin setiap porsi."
       action={<button className="primary-btn" data-testid="new-product-button" onClick={() => document.querySelector("#new-product")?.focus()}><Plus size={16} /> Produk baru</button>} />
-    <div className="product-form panel">
-      <div className="form-heading"><div className="form-icon"><ClipboardList size={18} /></div><div><h2>Tambah menu cepat</h2><span>Bind ke merchant / tenant</span></div></div>
-      <div className="form-fields">
-        <label>Nama produk<input id="new-product" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Contoh: Es Kopi Pandan" data-testid="product-name-input" /></label>
-        <label>Merchant<select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
-        <label>Kategori<select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
-        <label>Harga jual<input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} data-testid="product-price-input" /></label>
-        <label>HPP per porsi<input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: Number(e.target.value) })} data-testid="product-cost-input" /></label>
-        <label>Stok awal<input type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} data-testid="product-stock-input" /></label>
-        <button className="primary-btn" onClick={save} data-testid="save-product-button">Simpan</button>
+    <div className="product-form-v2 panel">
+      <div className="form-heading"><div className="form-icon"><ClipboardList size={18} /></div><div><h2>Tambah menu cepat</h2><span>Bind ke merchant / tenant · unggah foto produk</span></div></div>
+      <div className="product-form-grid">
+        <div className="product-image-picker">
+          <label className="image-drop" data-testid="product-image-label">
+            {form.image_url ? <img src={form.image_url} alt="preview" /> : <><ImageIcon size={30} /><span>Klik untuk unggah foto</span></>}
+            <input type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} data-testid="product-image-input" />
+          </label>
+        </div>
+        <div className="product-fields">
+          <label className="field-lg"><span>Nama produk</span><input id="new-product" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Contoh: Es Kopi Pandan" data-testid="product-name-input" /></label>
+          <label><span>Merchant</span><select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+          <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
+          <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} data-testid="product-price-input" /></label>
+          <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: Number(e.target.value) })} data-testid="product-cost-input" /></label>
+          <label><span>Stok awal</span><input type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} data-testid="product-stock-input" /></label>
+          <button className="primary-btn full-row" onClick={save} data-testid="save-product-button"><Plus size={14}/> Simpan produk</button>
+        </div>
       </div>
     </div>
     <div className="catalog-grid">
       {products.map((p) => <div className="catalog-item" key={p.id}>
-        <div className="product-art" style={{ background: p.color }}><Coffee size={26} /></div>
+        <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={26} />}</div>
         <div><b>{p.name}</b><span>{p.vendor} · {p.category}</span><small>Margin <strong>{p.price ? Math.round((1 - p.cost / p.price) * 100) : 0}%</strong> · Stok {p.stock}</small></div>
         <button className="more-btn" onClick={async () => { if (window.confirm(`Hapus ${p.name}?`)) { await axios.delete(`${API}/products/${p.id}`); reload(); notify("Produk dihapus"); } }} data-testid={`product-menu-${p.id}`}><Trash2 size={13} /></button>
       </div>)}
@@ -690,16 +763,34 @@ function Reports({ products, expenses }) {
 
 // -------- Tables (QR) --------
 function Tables({ notify }) {
+  const [count, setCount] = useState(12);
+  const [selected, setSelected] = useState(null);
+  const meja = Array.from({ length: count }, (_, i) => String(i + 1).padStart(2, "0"));
+  const linkFor = (t) => `${ORIGIN}/self-order?table=${t}`;
+  const printOne = (t) => { setSelected(t); setTimeout(() => window.print(), 200); };
   return <>
-    <SectionHeader eyebrow="SELF-ORDER STUDIO" title="QR meja pelanggan" description="Buat akses pemesanan unik untuk setiap meja di outlet."
-      action={<button className="primary-btn" data-testid="generate-qr-button" onClick={() => notify("QR meja berhasil dibuat")}><Plus size={16} /> Generate QR</button>} />
-    <div className="table-grid">
-      {Array.from({ length: 12 }, (_, i) => <div className="table-card" key={i}>
-        <div className="fake-qr"><span>{String(i + 1).padStart(2, "0")}</span></div>
-        <div><b>Meja {i + 1}</b><span>mjdkupi.id/order/{i + 1}</span></div>
-        <button className="small-action" data-testid={`print-table-${i + 1}`} onClick={() => notify(`Stiker Meja ${i + 1} siap dicetak`)}>Cetak</button>
+    <SectionHeader eyebrow="SELF-ORDER STUDIO" title="QR meja pelanggan" description="Generate QR asli yang bisa di-scan kamera HP. Setiap kartu meja unik dan siap cetak."
+      action={<div className="row-gap">
+        <label className="mini-num">Jumlah meja<input type="number" value={count} min={1} max={100} onChange={(e) => setCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} data-testid="tables-count-input" /></label>
+        <button className="primary-btn" data-testid="generate-qr-button" onClick={() => notify(`QR ${count} meja siap`)}><Plus size={16} /> Generate</button>
+      </div>} />
+    <div className="table-grid-v2">
+      {meja.map((t) => <div className="table-card-v2" key={t} data-testid={`table-card-${t}`}>
+        <div className="table-qr-real"><QRCodeSVG value={linkFor(t)} size={90} level="M" includeMargin={true} /></div>
+        <div className="table-card-info"><b>Meja {t}</b><span className="mono">{linkFor(t).replace(/^https?:\/\//, "")}</span></div>
+        <div className="table-card-actions">
+          <button className="small-action" onClick={() => { navigator.clipboard?.writeText(linkFor(t)); notify(`Link Meja ${t} disalin`); }} data-testid={`copy-table-${t}`}><Copy size={12} /> Salin</button>
+          <button className="small-action" data-testid={`print-table-${t}`} onClick={() => printOne(t)}><Printer size={12} /> Cetak</button>
+        </div>
       </div>)}
     </div>
+    {selected && <div className="print-sheet" data-testid="print-sheet"><div className="print-sticker">
+      <div className="brand-mark"><Coffee size={22}/></div>
+      <h2>MJD Kupi</h2>
+      <QRCodeSVG value={linkFor(selected)} size={220} level="H" includeMargin={true} />
+      <strong>Meja {selected}</strong>
+      <span>Scan QR untuk memesan menu tanpa antre</span>
+    </div></div>}
   </>;
 }
 
@@ -833,7 +924,11 @@ function ShiftOpenModal({ onClose, onOpened }) {
 function ShiftCloseModal({ shift, onClose, onClosed }) {
   const [cash, setCash] = useState(0);
   const [note, setNote] = useState("");
-  const submit = async () => { const { data } = await axios.post(`${API}/shifts/close`, { closing_cash: Number(cash), note }); onClosed(data); };
+  const submit = async () => {
+    await axios.post(`${API}/shifts/close`, { closing_cash: Number(cash), note });
+    const { data: report } = await axios.get(`${API}/shifts/${shift.id}/report`);
+    onClosed(report);
+  };
   return <div className="modal-backdrop"><div className="pay-modal" data-testid="shift-close-modal">
     <button className="modal-close" onClick={onClose}><X size={18} /></button>
     <div className="pay-head"><h2>Tutup shift kasir</h2><span>Kas awal: {money(shift.opening_cash)}</span></div>
@@ -842,11 +937,201 @@ function ShiftCloseModal({ shift, onClose, onClosed }) {
       <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} data-testid="shift-close-cash-input" />
       <label>Catatan</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} data-testid="shift-close-note-input" />
-      <div className="hint">Sistem akan otomatis menghitung selisih vs total kas penjualan.</div>
+      <div className="hint">Sistem akan otomatis menghitung selisih vs total kas penjualan dan menampilkan rincian shift.</div>
     </div>
-    <button className="primary-btn full" onClick={submit} data-testid="shift-close-submit"><StopCircle size={14}/> Tutup shift</button>
+    <button className="primary-btn full" onClick={submit} data-testid="shift-close-submit"><StopCircle size={14}/> Tutup shift & lihat rekap</button>
   </div></div>;
 }
+
+// -------- Shift Report Modal (Print + WA share) --------
+function ShiftReportModal({ report, onClose, notify }) {
+  const s = report.shift || {};
+  const fmt = (iso) => iso ? new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "-";
+  const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString("id-ID", { year: "numeric", month: "2-digit", day: "2-digit" }).replaceAll("/", "") : "";
+  const shiftId = `SHFT${fmtDate(s.opened_at)}_${(s.opened_at || "").slice(11, 16).replace(":", "")}`;
+  const lines = [
+    "================================",
+    "  MJD KUPI  LAPORAN SHIFT KASIR",
+    "================================",
+    `Shift ID     : ${shiftId}`,
+    `Kasir        : ${report.cashier_name || "-"}`,
+    `Waktu Mulai  : ${fmt(s.opened_at)}`,
+    `Waktu Selesai: ${fmt(s.closed_at)}`,
+    `Status Shift : ${(s.status || "").toUpperCase()}`,
+    "--------------------------------",
+    `Modal Awal    : Rp ${(s.opening_cash || 0).toLocaleString("id-ID")}`,
+    `Dibayar       : Rp ${(report.total_omset || 0).toLocaleString("id-ID")}`,
+    `Belum Bayar   : Rp ${(report.unpaid_total || 0).toLocaleString("id-ID")}`,
+    `Meja Lunas    : ${report.tables_paid}`,
+    `Meja Blm Lunas: ${report.tables_pending}`,
+    `Pengeluaran   : Rp ${(report.expenses_total || 0).toLocaleString("id-ID")}`,
+    `TOTAL CASH    : Rp ${(report.total_cash || 0).toLocaleString("id-ID")}`,
+    `TOTAL TRANSFER: Rp ${(report.total_transfer || 0).toLocaleString("id-ID")}`,
+    `TOTAL OMSET   : Rp ${(report.total_omset || 0).toLocaleString("id-ID")}`,
+    "--------------------------------",
+    "BREAKDOWN PER MERCHANT:",
+    ...Object.entries(report.per_merchant || {}).map(([k, v]) => `- ${k} : Rp ${Number(v).toLocaleString("id-ID")}`),
+    "================================",
+  ].join("\n");
+  const shareWA = () => window.open(`https://wa.me/?text=${encodeURIComponent(lines)}`, "_blank");
+  const printReport = () => window.print();
+  return <div className="modal-backdrop">
+    <div className="shift-report-modal" data-testid="shift-report-modal">
+      <button className="modal-close" onClick={onClose}><X size={18} /></button>
+      <pre className="shift-slip" data-testid="shift-slip">{lines}</pre>
+      <div className="shift-actions">
+        <button className="outline-btn" onClick={printReport} data-testid="shift-print-button"><Printer size={14}/> Printout struk</button>
+        <button className="primary-btn" onClick={shareWA} data-testid="shift-wa-button"><MessageCircle size={14}/> Kirim ke WhatsApp</button>
+      </div>
+      <button className="text-btn" onClick={onClose} data-testid="shift-close-report-button">Tutup</button>
+    </div>
+  </div>;
+}
+
+// -------- Online Orders Modal (POS) --------
+function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
+  const accept = async (id) => {
+    try {
+      await axios.post(`${API}/self-order/${id}/accept`);
+      notify("Pesanan diterima & masuk KDS");
+      reload();
+      onAcceptDone?.();
+    } catch (e) {
+      notify(e.response?.data?.detail || "Gagal menerima pesanan");
+    }
+  };
+  return <div className="modal-backdrop">
+    <div className="online-modal" data-testid="online-orders-modal">
+      <button className="modal-close" onClick={onClose}><X size={18} /></button>
+      <div className="pay-head"><h2>Pesanan masuk (QR Meja)</h2><span>{orders.length} antrean · terima untuk lanjut ke dapur</span></div>
+      <div className="online-list">
+        {orders.length === 0 && <div className="empty-cart"><QrCode size={30} /><b>Belum ada pesanan online</b><span>Pesanan self-order akan muncul di sini secara realtime</span></div>}
+        {orders.map((o) => <div className="online-item" key={o.id} data-testid={`online-item-${o.id}`}>
+          <div className="online-item-head">
+            <div><b>{o.table_no}</b><span className="mono">#{String(o.id).slice(-6)}</span></div>
+            <strong>{money(o.total)}</strong>
+          </div>
+          <ul className="online-lines">{(o.lines || []).map((ln, i) => <li key={i}><b>{ln.quantity}×</b> {ln.name}<em>{money(ln.price * ln.quantity)}</em></li>)}</ul>
+          {o.payment_proof && <div className="proof-thumb"><img src={o.payment_proof} alt="proof" /><small>Bukti pembayaran</small></div>}
+          <button className="primary-btn full" onClick={() => accept(o.id)} data-testid={`accept-online-${o.id}`}><Check size={14}/> Setujui & kirim ke dapur</button>
+        </div>)}
+      </div>
+    </div>
+  </div>;
+}
+
+// -------- Cashier Monitor (Admin) --------
+function CashierMonitor({ notify, onView }) {
+  const [shifts, setShifts] = useState([]);
+  const load = () => axios.get(`${API}/shifts`).then(({ data }) => setShifts(data)).catch(() => {});
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
+  const viewReport = async (id) => { try { const { data } = await axios.get(`${API}/shifts/${id}/report`); onView(data); } catch { notify("Gagal memuat rekap"); } };
+  const openCount = shifts.filter((s) => s.status === "open").length;
+  const totalOmset = shifts.reduce((a, s) => a + (s.total_cash || 0) + (s.total_transfer || 0), 0);
+  return <>
+    <SectionHeader eyebrow="AUDIT KASIR" title="Monitoring shift kasir" description="Pantau seluruh kasir yang sedang aktif dan riwayat shift real-time."
+      action={<button className="outline-btn" onClick={load} data-testid="refresh-cashiers-button"><Bell size={14}/> Refresh</button>} />
+    <div className="metric-grid three">
+      <Metric label="Shift aktif" value={openCount} change="kasir sedang bekerja" tone="orange" icon={UserCheck} />
+      <Metric label="Total shift" value={shifts.length} change="dalam 50 shift terakhir" tone="blue" icon={ClipboardList} />
+      <Metric label="Total omset" value={money(totalOmset)} change="akumulasi shift" tone="green" icon={Receipt} />
+    </div>
+    <section className="panel table-panel">
+      <div className="panel-head"><div><h2>Riwayat shift kasir</h2><span>Data real-time dari Supabase</span></div></div>
+      <div className="data-table">
+        <div className="table-row cashier-row table-label"><span>Kasir</span><span>Waktu</span><span>Modal awal</span><span>Total cash</span><span>Total transfer</span><span>Status</span><span /></div>
+        {shifts.map((s) => <div className="table-row cashier-row" key={s.id} data-testid={`cashier-row-${s.id}`}>
+          <span className="table-product"><div className="product-dot" style={{ background: "#fff0e6" }}><UserCheck size={14} /></div><b>{s.cashier_name}</b></span>
+          <span>{new Date(s.opened_at).toLocaleString("id-ID", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })}</span>
+          <span>{money(s.opening_cash)}</span>
+          <span><b>{money(s.total_cash)}</b></span>
+          <span>{money(s.total_transfer)}</span>
+          <span><i className={`status-dot ${s.status === "open" ? "good" : "low"}`} />{s.status === "open" ? "BUKA" : "TUTUP"}</span>
+          <button className="small-action" onClick={() => viewReport(s.id)} data-testid={`view-shift-${s.id}`}><FileText size={12} /> Rekap</button>
+        </div>)}
+        {shifts.length === 0 && <div className="empty-vendor"><UserCheck size={30} /><b>Belum ada shift</b><span>Kasir akan muncul di sini setelah membuka shift</span></div>}
+      </div>
+    </section>
+  </>;
+}
+
+// -------- Customer Self-Order (public /self-order?table=NN) --------
+function CustomerSelfOrder() {
+  const params = new URLSearchParams(window.location.search);
+  const tableParam = params.get("table") || "01";
+  const [products, setProducts] = useState([]);
+  const [cart, setCart] = useState([]);
+  const [step, setStep] = useState("menu"); // menu | pay | done
+  const [payMethod, setPayMethod] = useState("QRIS");
+  const [proof, setProof] = useState("");
+  const [qrisCode, setQrisCode] = useState("");
+  const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
+  useEffect(() => {
+    axios.get(`${API}/products`).then(({ data }) => setProducts(data)).catch(() => {});
+    axios.get(`${API}/settings/qris:outlet-sudirman`).then(({ data }) => setQrisCode(data?.qris_code || "")).catch(() => {});
+  }, []);
+  const add = (p) => setCart((cur) => cur.find((i) => i.id === p.id) ? cur.map((i) => i.id === p.id ? { ...i, qty: i.qty + 1 } : i) : [...cur, { ...p, qty: 1 }]);
+  const dec = (id) => setCart((cur) => cur.map((i) => i.id === id ? { ...i, qty: i.qty - 1 } : i).filter((i) => i.qty > 0));
+  const handleFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setProof(r.result); r.readAsDataURL(f); };
+  const sendOrder = async () => {
+    try {
+      await axios.post(`${API}/self-order`, {
+        table: `Meja ${tableParam}`,
+        lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id })),
+        total, notes: "Self-service QR",
+        payment_method: payMethod, payment_proof: proof,
+      });
+      setStep("done");
+    } catch { alert("Gagal mengirim pesanan"); }
+  };
+  const qrPayload = qrisCode || `MJDKUPI|AMOUNT:${total}|TABLE:${tableParam}`;
+  return <div className="customer-app" data-testid="customer-self-order">
+    <header className="customer-topbar">
+      <div className="brand-mark"><Coffee size={18}/></div>
+      <div><strong>MJD Kupi</strong><span>Meja {tableParam}</span></div>
+    </header>
+    {step === "menu" && <>
+      <div className="customer-grid">
+        {products.map((p) => <button key={p.id} className="customer-product" onClick={() => add(p)} data-testid={`customer-product-${p.id}`}>
+          <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={26} />}</div>
+          <b>{p.name}</b><span>{p.vendor}</span><strong>{money(p.price)}</strong>
+        </button>)}
+      </div>
+      {cart.length > 0 && <div className="customer-cart" data-testid="customer-cart-bar">
+        <div><b>{cart.reduce((a, i) => a + i.qty, 0)} item</b><span>{money(total)}</span></div>
+        <button className="primary-btn" onClick={() => setStep("pay")} data-testid="customer-checkout-button">Checkout <span>→</span></button>
+      </div>}
+    </>}
+    {step === "pay" && <div className="customer-pay">
+      <h2>Konfirmasi & bayar</h2>
+      <div className="customer-lines">{cart.map((i) => <div key={i.id} className="customer-line">
+        <div><b>{i.name}</b><span>{money(i.price)}</span></div>
+        <div className="qty"><button onClick={() => dec(i.id)}>−</button><strong>{i.qty}</strong><button onClick={() => add(i)}>+</button></div>
+      </div>)}</div>
+      <div className="customer-total"><span>Total</span><strong>{money(total)}</strong></div>
+      <div className="pay-tabs">
+        {[["QRIS", QrCode], ["Transfer", CreditCard], ["Cash", DollarSign]].map(([m, Icon]) => (
+          <button key={m} className={payMethod === m ? "active" : ""} onClick={() => setPayMethod(m)} data-testid={`customer-method-${m.toLowerCase()}`}><Icon size={16} />{m}</button>
+        ))}
+      </div>
+      {payMethod === "QRIS" && <div className="qris-real"><QRCodeSVG value={qrPayload} size={200} level="M" includeMargin={true} /></div>}
+      {payMethod !== "Cash" && <>
+        <label className="customer-label">Upload bukti pembayaran</label>
+        <input type="file" accept="image/*" onChange={handleFile} data-testid="customer-proof-input" />
+        {proof && <div className="proof-thumb"><img src={proof} alt="bukti" /><Check size={16} color="#059669"/></div>}
+      </>}
+      <button className="primary-btn full" onClick={sendOrder} data-testid="customer-send-order"><Check size={15}/> Kirim pesanan ke kasir</button>
+      <button className="text-btn" onClick={() => setStep("menu")}>← Kembali ke menu</button>
+    </div>}
+    {step === "done" && <div className="customer-done" data-testid="customer-done">
+      <div className="brand-mark big"><Check size={30}/></div>
+      <h2>Pesanan terkirim!</h2>
+      <p>Meja {tableParam} · {money(total)}</p>
+      <span>Kasir akan segera memproses pesanan Anda. Terima kasih!</span>
+    </div>}
+  </div>;
+}
+
 
 // -------- Login --------
 function Login({ onLogin }) {

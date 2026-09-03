@@ -58,6 +58,7 @@ class Product(Base):
     cost = Column(Float, default=0.0)
     stock = Column(Integer, default=0)
     color = Column(String(16), default="#ffedd5")
+    image_url = Column(Text, default="")
     modifiers = Column(JSON, default=list)
 
 
@@ -109,6 +110,8 @@ class SelfOrder(Base):
     notes = Column(Text, default="")
     status = Column(String(32), default="Menunggu kasir", index=True)
     lines = Column(JSON, default=list)
+    payment_proof = Column(Text, default="")
+    payment_method = Column(String(32), default="")
     created_at = Column(DateTime(timezone=True), default=utc_now, index=True)
 
 

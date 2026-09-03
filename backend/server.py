@@ -53,6 +53,7 @@ class ProductInput(BaseModel):
     cost: float = 0
     stock: int = 0
     color: str = "#ffedd5"
+    image_url: str = ""
     modifiers: List[Any] = []
 
 
@@ -99,6 +100,8 @@ class SelfOrderInput(BaseModel):
     lines: List[SaleLine]
     total: float
     notes: str = ""
+    payment_method: str = ""
+    payment_proof: str = ""
 
 
 class OutletInput(BaseModel):
@@ -352,6 +355,7 @@ async def create_product(
         cost=payload.cost,
         stock=payload.stock,
         color=payload.color,
+        image_url=payload.image_url,
         modifiers=payload.modifiers,
     )
     db.add(product)
@@ -540,7 +544,18 @@ async def create_sale(
 
 @api_router.get("/sales")
 async def list_sales(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
-    result = await db.execute(select(M.Sale).order_by(M.Sale.created_at.desc()).limit(500))
+    stmt = select(M.Sale).order_by(M.Sale.created_at.desc()).limit(500)
+    # Isolation: Kasir hanya melihat transaksi shift aktifnya sendiri
+    if user.role == "Kasir":
+        active = await db.execute(
+            select(M.Shift).where(M.Shift.cashier_id == user.id, M.Shift.status == "open")
+        )
+        shift = active.scalar_one_or_none()
+        if shift:
+            stmt = select(M.Sale).where(M.Sale.shift_id == shift.id).order_by(M.Sale.created_at.desc())
+        else:
+            return []
+    result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
 
 
@@ -572,14 +587,64 @@ async def create_self_order(payload: SelfOrderInput, db: AsyncSession = Depends(
         total=payload.total,
         notes=payload.notes,
         lines=[ln.model_dump() for ln in payload.lines],
+        payment_method=payload.payment_method,
+        payment_proof=payload.payment_proof,
     )
     db.add(order)
     await db.commit()
     await db.refresh(order)
-    await create_kitchen_tickets(
-        db, order.id, "self", order.table_no, [ln.model_dump() for ln in payload.lines]
-    )
     return to_dict(order)
+
+
+@api_router.post("/self-order/{order_id}/accept")
+async def accept_self_order(
+    order_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Kasir", "Merchant Admin", "Super Admin")),
+):
+    """Kasir menyetujui pesanan online: buat sale, kurangi stok, buat KDS tickets."""
+    result = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
+    if order.status not in ("Menunggu kasir", "Menunggu konfirmasi"):
+        raise HTTPException(status_code=400, detail=f"Pesanan sudah {order.status}")
+
+    shift_id = None
+    if user.role == "Kasir":
+        active = await db.execute(
+            select(M.Shift).where(M.Shift.cashier_id == user.id, M.Shift.status == "open")
+        )
+        shift = active.scalar_one_or_none()
+        if not shift:
+            raise HTTPException(status_code=400, detail="Buka shift terlebih dahulu")
+        shift_id = shift.id
+
+    subtotal = float(order.total)
+    sale = M.Sale(
+        id=str(uuid.uuid4()),
+        table_no=order.table_no,
+        subtotal=subtotal,
+        tax=0,
+        total=subtotal,
+        payment_method=order.payment_method or "QRIS",
+        payment_reference=(order.payment_proof or "")[:120],
+        outlet_id=user.outlet_id or "outlet-sudirman",
+        cashier_id=user.id,
+        shift_id=shift_id,
+        lines=order.lines or [],
+    )
+    db.add(sale)
+    for line in (order.lines or []):
+        r = await db.execute(select(M.Product).where(M.Product.id == line.get("product_id")))
+        product = r.scalar_one_or_none()
+        if product:
+            product.stock = max(0, int(product.stock or 0) - int(line.get("quantity", 0)))
+    order.status = "Diproses"
+    await db.commit()
+    await db.refresh(sale)
+    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, order.lines or [])
+    return to_dict(sale)
 
 
 @api_router.get("/vendor/orders")
@@ -736,6 +801,94 @@ async def list_shifts(
     user: M.User = Depends(require_roles("Super Admin", "Merchant Admin")),
 ):
     result = await db.execute(select(M.Shift).order_by(M.Shift.opened_at.desc()).limit(50))
+    shifts = [to_dict(row) for row in result.scalars().all()]
+    # Enrich with realtime cash & transfer totals
+    for s in shifts:
+        cash_r = await db.execute(
+            select(func.coalesce(func.sum(M.Sale.total), 0)).where(
+                M.Sale.shift_id == s["id"], M.Sale.payment_method == "Cash"
+            )
+        )
+        trf_r = await db.execute(
+            select(func.coalesce(func.sum(M.Sale.total), 0)).where(
+                M.Sale.shift_id == s["id"], M.Sale.payment_method != "Cash"
+            )
+        )
+        count_r = await db.execute(
+            select(func.count(M.Sale.id)).where(M.Sale.shift_id == s["id"])
+        )
+        s["total_cash"] = float(cash_r.scalar_one() or 0)
+        s["total_transfer"] = float(trf_r.scalar_one() or 0)
+        s["transaction_count"] = int(count_r.scalar_one() or 0)
+    return shifts
+
+
+@api_router.get("/shifts/{shift_id}/report")
+async def shift_report(
+    shift_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(current_user),
+):
+    """Detailed shift report for close/print/WA share."""
+    result = await db.execute(select(M.Shift).where(M.Shift.id == shift_id))
+    shift = result.scalar_one_or_none()
+    if not shift:
+        raise HTTPException(status_code=404, detail="Shift tidak ditemukan")
+    if user.role == "Kasir" and shift.cashier_id != user.id:
+        raise HTTPException(status_code=403, detail="Bukan shift Anda")
+
+    sales_r = await db.execute(select(M.Sale).where(M.Sale.shift_id == shift_id))
+    sales = sales_r.scalars().all()
+    cash = sum(s.total for s in sales if s.payment_method == "Cash")
+    transfer = sum(s.total for s in sales if s.payment_method != "Cash")
+    tables_paid = len({s.table_no for s in sales})
+
+    # Pending self-orders on this shift's day (Menunggu kasir)
+    pending_r = await db.execute(
+        select(M.SelfOrder).where(M.SelfOrder.status == "Menunggu kasir")
+    )
+    pendings = pending_r.scalars().all()
+    tables_pending = len({o.table_no for o in pendings})
+    unpaid_total = sum(o.total for o in pendings)
+
+    # Expenses today
+    exp_r = await db.execute(select(func.coalesce(func.sum(M.Expense.amount), 0)))
+    expenses_total = float(exp_r.scalar_one() or 0)
+
+    # Per merchant breakdown
+    per_merchant: dict[str, float] = {}
+    for s in sales:
+        for ln in (s.lines or []):
+            key = ln.get("vendor") or "MJD Kupi"
+            per_merchant[key] = per_merchant.get(key, 0) + (ln.get("price", 0) * ln.get("quantity", 0))
+
+    return {
+        "shift": to_dict(shift),
+        "cashier_name": shift.cashier_name,
+        "total_cash": float(cash),
+        "total_transfer": float(transfer),
+        "total_omset": float(cash + transfer),
+        "tables_paid": tables_paid,
+        "tables_pending": tables_pending,
+        "unpaid_total": float(unpaid_total),
+        "expenses_total": expenses_total,
+        "transaction_count": len(sales),
+        "per_merchant": per_merchant,
+    }
+
+
+@api_router.get("/pos/online-orders")
+async def pos_online_orders(
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Kasir", "Merchant Admin", "Super Admin")),
+):
+    """Antrean pesanan dari QR meja self-order yang belum di-approve kasir."""
+    result = await db.execute(
+        select(M.SelfOrder)
+        .where(M.SelfOrder.status.in_(["Menunggu kasir", "Menunggu konfirmasi"]))
+        .order_by(M.SelfOrder.created_at.desc())
+        .limit(100)
+    )
     return [to_dict(row) for row in result.scalars().all()]
 
 
@@ -815,6 +968,14 @@ DEMO_PRODUCTS = [
 async def bootstrap():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Idempotent ALTER for new columns on existing tables (Feb 2026)
+        from sqlalchemy import text
+        for stmt in (
+            "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''",
+            "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(32) DEFAULT ''",
+            "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS payment_proof TEXT DEFAULT ''",
+        ):
+            await conn.execute(text(stmt))
 
     async with AsyncSessionLocal() as db:
         # Seed outlets
