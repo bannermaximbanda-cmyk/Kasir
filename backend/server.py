@@ -21,6 +21,9 @@ import models as M
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("mjd-kupi")
+
 app = FastAPI(title="MJD Kupi API", version="2.0.0")
 api_router = APIRouter(prefix="/api")
 
@@ -153,6 +156,7 @@ def public_user(user: M.User) -> dict:
         "role": user.role,
         "name": user.name,
         "outlet_id": user.outlet_id or "outlet-sudirman",
+        "merchant_id": user.merchant_id or "",
     }
 
 
@@ -225,7 +229,8 @@ async def login(payload: LoginInput, response: Response, db: AsyncSession = Depe
         raise HTTPException(status_code=403, detail="Akun dinonaktifkan")
     access = token_for(user)
     refresh = token_for(user, "refresh")
-    cookie_kwargs = dict(httponly=True, secure=True, samesite="none")
+    # Same-origin deployment (frontend + /api served via ingress) → SameSite=Lax mitigates CSRF.
+    cookie_kwargs = dict(httponly=True, secure=True, samesite="lax")
     response.set_cookie("access_token", access, max_age=28800, **cookie_kwargs)
     response.set_cookie("refresh_token", refresh, max_age=604800, **cookie_kwargs)
     return {**public_user(user), "access_token": access}
@@ -320,6 +325,7 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin")),
 ):
+    allow_reveal = os.environ.get("ALLOW_PLAIN_PASSWORD_VIEW", "false").lower() == "true"
     result = await db.execute(select(M.User).order_by(M.User.created_at.desc()))
     users = []
     for u in result.scalars().all():
@@ -330,10 +336,13 @@ async def list_users(
             "role": u.role,
             "name": u.name,
             "outlet_id": u.outlet_id or "",
-            "plain_password": u.plain_password or "",
+            # plain_password only exposed when ALLOW_PLAIN_PASSWORD_VIEW=true (business ops flag)
+            "plain_password": (u.plain_password or "") if allow_reveal else "",
+            "reveal_enabled": allow_reveal,
             "active": u.active if u.active is not None else True,
             "created_at": u.created_at.isoformat() if u.created_at else "",
         })
+    logger.info(f"[audit] user_list_read by={user.username or user.email} reveal={allow_reveal} count={len(users)}")
     return users
 
 
@@ -578,7 +587,10 @@ async def adjust_stock(
 
 
 @api_router.get("/stock-logs")
-async def stock_logs(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
+async def stock_logs(
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Admin", "Super Admin")),
+):
     result = await db.execute(select(M.StockLog).order_by(M.StockLog.created_at.desc()).limit(500))
     return [to_dict(row) for row in result.scalars().all()]
 
@@ -589,7 +601,13 @@ async def stock_logs(db: AsyncSession = Depends(get_db), user: M.User = Depends(
 
 @api_router.get("/expenses")
 async def list_expenses(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
-    result = await db.execute(select(M.Expense).order_by(M.Expense.date.desc()))
+    stmt = select(M.Expense).order_by(M.Expense.date.desc())
+    # SEC-004: Kasir only sees own expenses; others see all (business ops view)
+    if user.role == "Kasir":
+        stmt = stmt.where(M.Expense.user_id == user.id)
+    elif user.role == "Vendor":
+        raise HTTPException(status_code=403, detail="Vendor tidak berhak melihat pengeluaran")
+    result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
 
 
@@ -674,34 +692,56 @@ async def create_sale(
             raise HTTPException(status_code=400, detail="Buka shift terlebih dahulu sebelum bertransaksi")
         shift_id = shift.id
 
+    # SEC-005: recompute totals server-side from authoritative product prices.
+    verified_lines: list[dict] = []
+    subtotal = 0.0
+    for line in payload.lines:
+        pr = await db.execute(select(M.Product).where(M.Product.id == line.product_id))
+        product = pr.scalar_one_or_none()
+        if not product:
+            raise HTTPException(status_code=400, detail=f"Produk {line.product_id} tidak ditemukan")
+        qty = max(1, int(line.quantity or 0))
+        price = float(product.price)
+        subtotal += price * qty
+        verified_lines.append({
+            "product_id": product.id,
+            "name": product.name,
+            "quantity": qty,
+            "price": price,
+            "vendor": product.vendor,
+            "merchant_id": product.merchant_id,
+        })
+    # Honor tax the client sent only if it is <= 10% of computed subtotal (guard against tax=0 games / inflation)
+    computed_tax = round(subtotal * 0.10)
+    tax = float(payload.tax) if 0 <= float(payload.tax) <= computed_tax * 1.05 else computed_tax
+    total = round(subtotal + tax)
+
     sale = M.Sale(
         id=payload.id or str(uuid.uuid4()),
         table_no=payload.table,
-        subtotal=payload.subtotal,
-        tax=payload.tax,
-        total=payload.total,
+        subtotal=subtotal,
+        tax=tax,
+        total=total,
         payment_method=payload.payment_method,
         payment_reference=payload.payment_reference,
         cash_received=payload.cash_received,
-        change_amount=payload.change_amount,
+        change_amount=max(0, float(payload.cash_received or 0) - total),
         outlet_id=user.outlet_id or "outlet-sudirman",
         cashier_id=user.id,
         shift_id=shift_id,
-        lines=[ln.model_dump() for ln in payload.lines],
+        lines=verified_lines,
     )
     db.add(sale)
     # Deduct stock
-    for line in payload.lines:
-        result = await db.execute(select(M.Product).where(M.Product.id == line.product_id))
-        product = result.scalar_one_or_none()
+    for line in verified_lines:
+        r = await db.execute(select(M.Product).where(M.Product.id == line["product_id"]))
+        product = r.scalar_one_or_none()
         if product:
-            product.stock = max(0, int(product.stock or 0) - int(line.quantity))
+            product.stock = max(0, int(product.stock or 0) - int(line["quantity"]))
     await db.commit()
     await db.refresh(sale)
     # Kitchen tickets split per merchant
-    await create_kitchen_tickets(
-        db, sale.id, "sale", sale.table_no, [ln.model_dump() for ln in payload.lines]
-    )
+    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, verified_lines)
     return to_dict(sale)
 
 
@@ -783,7 +823,24 @@ async def accept_self_order(
             raise HTTPException(status_code=400, detail="Buka shift terlebih dahulu")
         shift_id = shift.id
 
-    subtotal = float(order.total)
+    subtotal = 0.0
+    verified_lines: list[dict] = []
+    for line in (order.lines or []):
+        pr = await db.execute(select(M.Product).where(M.Product.id == line.get("product_id")))
+        product = pr.scalar_one_or_none()
+        if not product:
+            continue
+        qty = max(1, int(line.get("quantity") or 0))
+        price = float(product.price)
+        subtotal += price * qty
+        verified_lines.append({
+            "product_id": product.id,
+            "name": product.name,
+            "quantity": qty,
+            "price": price,
+            "vendor": product.vendor,
+            "merchant_id": product.merchant_id,
+        })
     sale = M.Sale(
         id=str(uuid.uuid4()),
         table_no=order.table_no,
@@ -795,18 +852,18 @@ async def accept_self_order(
         outlet_id=user.outlet_id or "outlet-sudirman",
         cashier_id=user.id,
         shift_id=shift_id,
-        lines=order.lines or [],
+        lines=verified_lines,
     )
     db.add(sale)
-    for line in (order.lines or []):
-        r = await db.execute(select(M.Product).where(M.Product.id == line.get("product_id")))
+    for line in verified_lines:
+        r = await db.execute(select(M.Product).where(M.Product.id == line["product_id"]))
         product = r.scalar_one_or_none()
         if product:
-            product.stock = max(0, int(product.stock or 0) - int(line.get("quantity", 0)))
+            product.stock = max(0, int(product.stock or 0) - int(line["quantity"]))
     order.status = "Diproses"
     await db.commit()
     await db.refresh(sale)
-    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, order.lines or [])
+    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, verified_lines)
     return to_dict(sale)
 
 
@@ -815,8 +872,15 @@ async def vendor_orders(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Vendor", "Admin", "Super Admin")),
 ):
-    result = await db.execute(select(M.SelfOrder).order_by(M.SelfOrder.created_at.desc()).limit(200))
-    return [to_dict(row) for row in result.scalars().all()]
+    stmt = select(M.SelfOrder).order_by(M.SelfOrder.created_at.desc()).limit(200)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    if user.role == "Vendor" and user.merchant_id:
+        # Only expose orders that contain at least one line for this vendor's merchant
+        rows = [r for r in rows if any(
+            (ln.get("merchant_id") or "") == user.merchant_id for ln in (r.lines or [])
+        )]
+    return [to_dict(row) for row in rows]
 
 
 @api_router.patch("/vendor/orders/{order_id}")
@@ -830,6 +894,11 @@ async def update_vendor_order(
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order tidak ditemukan")
+    # SEC-003: vendor can only touch orders that involve their merchant
+    if user.role == "Vendor" and user.merchant_id:
+        owns = any((ln.get("merchant_id") or "") == user.merchant_id for ln in (order.lines or []))
+        if not owns:
+            raise HTTPException(status_code=403, detail="Bukan order merchant Anda")
     order.status = status
     await db.commit()
     return {"id": order_id, "status": status}
@@ -867,6 +936,9 @@ async def kds_orders(
         .order_by(M.KitchenOrder.sla_start.asc())
         .limit(200)
     )
+    # SEC-003: Vendors only see their merchant's tickets
+    if user.role == "Vendor" and user.merchant_id:
+        stmt = stmt.where(M.KitchenOrder.merchant_id == user.merchant_id)
     result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
 
@@ -882,6 +954,8 @@ async def update_kds_status(
     ticket = result.scalar_one_or_none()
     if not ticket:
         raise HTTPException(status_code=404, detail="Tiket dapur tidak ditemukan")
+    if user.role == "Vendor" and user.merchant_id and ticket.merchant_id != user.merchant_id:
+        raise HTTPException(status_code=403, detail="Bukan tiket merchant Anda")
     ticket.status = payload.status
     ticket.updated_at = datetime.now(timezone.utc)
     await db.commit()
@@ -1144,7 +1218,10 @@ async def bootstrap():
             "ALTER TABLE mjd_expenses ADD COLUMN IF NOT EXISTS user_name VARCHAR(120) DEFAULT ''",
             "ALTER TABLE mjd_expenses ADD COLUMN IF NOT EXISTS shift_id VARCHAR(36)",
             "ALTER TABLE mjd_outlets ADD COLUMN IF NOT EXISTS phone VARCHAR(32) DEFAULT ''",
+            "ALTER TABLE mjd_users ADD COLUMN IF NOT EXISTS merchant_id VARCHAR(36)",
             "UPDATE mjd_users SET role='Admin' WHERE role='Merchant Admin'",
+            # SEC: bind demo Vendor user to the first seeded merchant (Barista Kopi) so its queries are scoped.
+            "UPDATE mjd_users SET merchant_id='m-barista' WHERE role='Vendor' AND (merchant_id IS NULL OR merchant_id='')",
         ):
             await conn.execute(text(stmt))
 
@@ -1234,5 +1311,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    # SEC-001 defense-in-depth: require custom header on state-changing API routes.
+    # Browsers cannot send custom headers on cross-site simple requests → effective anti-CSRF
+    # even if the ingress rewrites cookie SameSite. Same-origin fetch()/axios sends it fine.
+    method = request.method.upper()
+    path = request.url.path or ""
+    is_state = method in ("POST", "PUT", "PATCH", "DELETE")
+    # Allow list: login (bootstraps session) and public customer self-order create
+    allow = path.startswith("/api/auth/login") or path == "/api/self-order"
+    if is_state and path.startswith("/api/") and not allow:
+        if request.headers.get("x-requested-with", "").lower() != "mjd-kupi":
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "CSRF header missing"}, status_code=403)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response

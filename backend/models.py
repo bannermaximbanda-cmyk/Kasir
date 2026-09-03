@@ -25,6 +25,7 @@ class User(Base):
     role = Column(String(32), nullable=False, index=True)
     name = Column(String(120), nullable=False)
     outlet_id = Column(String(36), default="outlet-sudirman")
+    merchant_id = Column(String(36), index=True, nullable=True)  # For Vendor role - tenant binding
     active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=utc_now)
 

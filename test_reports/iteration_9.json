@@ -1,0 +1,30 @@
+{
+  "summary": "Retested security fixes iter9 after main agent added (1) merchant_id in public_user, (2) CSRF X-Requested-With middleware. Updated /app/backend/tests/test_security_fixes.py: added CSRF_HEADER globally via session.headers.update, plus 3 new CSRF tests (reject-without-header, login-allowlist, self-order-allowlist). Total 22 tests. Result: 21 PASSED, 1 FAILED. The single failure is test_sec001_login_cookie_samesite_lax — backend emits SameSite=Lax but Kubernetes/CloudFront ingress rewrites Set-Cookie to SameSite=None; explicitly flagged out-of-scope in the request since CSRF header defense-in-depth now covers this. Both remedial fixes verified: Fix1 vendor /auth/me returns merchant_id='m-barista'. Fix2 middleware rejects POST /api/expenses without header (403 'CSRF header missing'), allowlists /api/auth/login and /api/self-order. SEC-002 audit log present. SEC-003 vendor scoping enforced on KDS/orders + 403 on cross-merchant patch. SEC-004 kasir expenses scoped, vendor forbidden, stock-logs admin-only. SEC-005 server recomputes subtotal=36000 from tampered price=1 (p-1 authoritative price 18000). Security headers all present. Self-order accept recomputes total=15000 from p-2 price.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/login (Set-Cookie)", "issue": "Ingress rewrites SameSite=Lax→SameSite=None; noted out-of-scope by main agent since CSRF header middleware mitigates CSRF risk regardless of SameSite value"}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_security_fixes.py",
+    "/app/test_reports/pytest/iteration_9_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL/DEFERRED: Investigate ingress-level Set-Cookie rewrite for SameSite=Lax if strict SameSite hardening becomes required later (currently mitigated by CSRF header middleware)."
+  ],
+  "critical_code_review_comments": [
+    "CSRF middleware correctly allowlists /api/auth/login and /api/self-order — good scope minimization.",
+    "public_user() now emits merchant_id for all roles (empty string for non-vendor) — consistent shape avoids frontend null-checks.",
+    "Server-side price recompute in POST /api/sales and /self-order/accept correctly overrides tampered client-supplied prices."
+  ],
+  "updated_files": ["/app/backend/tests/test_security_fixes.py"],
+  "success_rate": {"backend": "95.5% (21/22)", "frontend": "N/A"},
+  "test_credentials": "See /app/memory/test_credentials.md — superadmin/.Superadmin1_, admin|vendor|kasir / MjdKupi#2026",
+  "seed_data_creation": "Test creates transient TEST_SEC004_* expenses (kasir), SEC-KDS/SEC-PRICE/SEC-SO sales; all persisted to Supabase Postgres, prefixed for identification.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_security_fixes.py now uses global CSRF_HEADER via session.headers.update. Any new state-changing test using login() inherits header automatically. To test CSRF rejection, use a fresh requests.Session() without header (see test_csrf_*). SameSite=Lax cookie failure is expected/known ingress behavior — do not treat as regression.",
+  "rca of the issue": "SEC-001 SameSite cookie failure RCA: Backend server.py set_cookie(samesite='lax') is correct, but preview.emergentagent.com ingress/CDN adds Partitioned attribute and rewrites SameSite to 'none' for cross-site iframe/preview compatibility. Not a backend bug. Mitigation: the newly-added CSRF header requirement (X-Requested-With: mjd-kupi) on state-changing routes prevents CSRF regardless of cookie SameSite."
+}

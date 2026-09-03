@@ -16,6 +16,9 @@ const money = (n) => new Intl.NumberFormat("id-ID", { style: "currency", currenc
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
 axios.defaults.withCredentials = true;
+// SEC-001 defense-in-depth: custom header on every request. Cross-site attackers cannot set
+// custom headers on simple requests (triggers CORS preflight which is blocked).
+axios.defaults.headers.common["X-Requested-With"] = "mjd-kupi";
 
 const NAV_BY_ROLE = {
   "Super Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "users", "settings"],
@@ -1041,8 +1044,10 @@ function UserManagement({ notify }) {
           <span className="mono-inline"><b>{u.username || "-"}</b><small>{u.email}</small></span>
           <span><span className={`role-badge role-${u.role.toLowerCase().replaceAll(" ", "-")}`}>{u.role}</span></span>
           <span className="pass-cell">
-            {reveal[u.id] ? <code data-testid={`user-pass-${u.id}`}>{u.plain_password || "(kosong)"}</code> : <code>••••••••</code>}
-            <button className="icon-btn" onClick={() => setReveal({ ...reveal, [u.id]: !reveal[u.id] })} data-testid={`toggle-pass-${u.id}`}>{reveal[u.id] ? <EyeOff size={13} /> : <Eye size={13} />}</button>
+            {u.reveal_enabled === false ? <code data-testid={`user-pass-${u.id}`}>disabled</code>
+              : reveal[u.id] ? <code data-testid={`user-pass-${u.id}`}>{u.plain_password || "(kosong)"}</code>
+              : <code>••••••••</code>}
+            {u.reveal_enabled !== false && <button className="icon-btn" onClick={() => setReveal({ ...reveal, [u.id]: !reveal[u.id] })} data-testid={`toggle-pass-${u.id}`}>{reveal[u.id] ? <EyeOff size={13} /> : <Eye size={13} />}</button>}
           </span>
           <span><i className={`status-dot ${u.active ? "good" : "low"}`} />{u.active ? "Aktif" : "Nonaktif"}</span>
           <div className="row-gap">

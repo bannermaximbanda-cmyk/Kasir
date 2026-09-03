@@ -25,6 +25,15 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - WA click-to-chat per merchant untuk tiket dapur
 - Printer thermal 58/80mm, split kitchen toggle
 
+## Security Hardening (Iteration 8-9, Feb 2026)
+- [x] **SEC-001 CSRF**: Cookies `SameSite=Lax` + `X-Requested-With: mjd-kupi` header middleware on all state-changing routes (POST/PUT/PATCH/DELETE) except `/api/auth/login` and `/api/self-order`. Cross-site attackers cannot set custom headers on simple requests (CORS preflight blocks) → effective CSRF defense.
+- [x] **SEC-002 plain_password gated**: ENV flag `ALLOW_PLAIN_PASSWORD_VIEW` (default true for MVP), audit log line on every `/admin/users` read, frontend gracefully hides reveal button when `reveal_enabled=false`.
+- [x] **SEC-003 Vendor tenant isolation**: `User.merchant_id` added; `/vendor/orders`, `/kds/orders` GET/PATCH scoped to `user.merchant_id` for Vendor role. Demo vendor bound to `m-barista`.
+- [x] **SEC-004 Cross-user data leakage**: `/expenses` GET filtered by `user_id` for Kasir + 403 for Vendor; `/stock-logs` require Admin/Super Admin.
+- [x] **SEC-005 Server-side pricing**: `create_sale` + `accept_self_order` recompute `subtotal`, `line.price`, `total` from authoritative `M.Product.price`. Tax capped to ≤10.5% of computed subtotal. Change_amount recomputed. Client price tampering rejected.
+- [x] Security headers middleware: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy` (camera/mic/geo denied).
+- [x] Verified: 21/22 backend security tests passing (1 known ingress-side SameSite rewrite, mitigated by custom-header CSRF).
+
 ## Implemented (Feb 2026, this session)
 - [x] Migrasi lengkap MongoDB → Supabase Postgres (SQLAlchemy async + asyncpg, statement_cache_size=0)
 - [x] RBAC ketat 4 role: Super Admin (full + users + settings), Admin (management + monitoring, no system config), Kasir (POS + expense + KDS only), Vendor (KDS + vendor center + self-service)

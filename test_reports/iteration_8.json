@@ -1,0 +1,32 @@
+{
+  "summary": "Ran /app/backend/tests/test_security_fixes.py (19 tests, backend-only) verifying 5 SEC-* audit fixes + regression. 17 passed. 2 failed: (1) SEC-001 cookies exit backend as SameSite=Lax at localhost:8001, but the public preview URL response Set-Cookie is rewritten by the Kubernetes ingress/Cloudflare edge to 'SameSite=None; Partitioned', undermining the CSRF fix from the browser's perspective. (2) SEC-003 partially failing: /api/auth/me does not include merchant_id in the response — public_user() helper in server.py omits the field, so frontend/vendor SPA cannot know its bound merchant. All other SEC controls (plain_password gating + audit log, vendor KDS scoping + 403 cross-merchant PATCH, vendor/orders scoping, expenses Kasir-only + Vendor 403, stock-logs Admin-only, server-side price recompute, security headers) work correctly. Full regression (4-role login, products/merchants/outlets, shift open/report, self-order accept with server-side recompute) passes.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/auth/login (via ingress)", "issue": "Backend correctly sets SameSite=Lax on cookies (verified via localhost:8001), but the response cookies arriving at browsers through the preview ingress are rewritten to 'SameSite=None; Partitioned'. This defeats SEC-001. Main agent must investigate ingress/CDN cookie rewrite rules or set explicit response header via middleware after ingress terminates TLS.", "priority": "HIGH"},
+      {"endpoint": "GET /api/auth/me", "issue": "Response does not include merchant_id. public_user() in server.py (lines 151-159) omits merchant_id. Requirement expects vendor login /auth/me to expose merchant_id='m-barista'. Add merchant_id key to public_user().", "priority": "HIGH"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_security_fixes.py", "/app/test_reports/pytest/security_fixes.xml"],
+  "action_items": [
+    "Fix public_user() to include merchant_id (impacts vendor SPA scoping display).",
+    "Investigate why edge/ingress rewrites Set-Cookie SameSite=Lax → None; Partitioned on preview URL. Backend emits correct Lax at :8001. Possibly Cloudflare 'Always Use HTTPS'/'HTTP/3 cookie rewriting' or an ingress annotation. Consider explicit Cookie header write via ASGI Response to preserve attribute, or add ingress bypass rule."
+  ],
+  "critical_code_review_comments": [
+    "server.py `create_sale` tax comparison: `0 <= float(payload.tax) <= computed_tax * 1.05`. If subtotal is 0 (product not found causes 400 earlier so unreachable but still), computed_tax=0 → any client tax>0 falls back to 0 which is correct. Ok.",
+    "server.py `accept_self_order` sets tax=0 unconditionally — inconsistent with POS which allows up to 10%. Consider aligning.",
+    "server.py `vendor_orders` filter iterates in Python (rows in-memory) — acceptable at limit 200, but a SQL-level JSON contains filter would scale better.",
+    "public_user() misses merchant_id — critical (see above).",
+    "Cookie samesite lax is code-correct; issue is infra-side.",
+    "logger.info audit line is fine but consider structured JSON logging so audit lines are grep-safe and machine-parseable."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "89%", "frontend": "not tested (backend only)"},
+  "test_credentials": "superadmin/.Superadmin1_, admin/MjdKupi#2026, vendor/MjdKupi#2026, kasir/MjdKupi#2026 — all verified.",
+  "seed_data_creation": "Created ephemeral Kasir sales for KDS cross-merchant test (tables SEC-KDS, SEC-PRICE, SEC-SO), TEST_SEC004_* expenses. No cleanup performed (persistent Postgres).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Test file /app/backend/tests/test_security_fixes.py has 19 tests. After main agent fixes (a) adds merchant_id to public_user() and (b) resolves ingress cookie rewrite, rerun `pytest backend/tests/test_security_fixes.py -v`. Note SEC-001 assertion checks the public URL; if ingress cannot be fixed, we should still keep the direct-backend verification as evidence — consider adding a separate assertion via localhost:8001 to confirm code correctness. Frontend RBAC and UserManagement reveal button were NOT tested (backend-only scope).",
+  "rca of the issue": "SEC-001 root cause: FastAPI Response.set_cookie(samesite='lax') is honored by Uvicorn (curl on localhost:8001 shows SameSite=lax; Secure). However, the preview.emergentagent.com edge proxy (Cloudflare fingerprint via __cf_bm cookie in response) is rewriting all Set-Cookie attributes to include SameSite=None; Partitioned, likely due to Cloudflare's cross-site cookie enforcement or an ingress cookie policy. Fix must happen at ingress/CDN config, not app code. SEC-003 root cause: public_user() helper builds the /auth/me response but was not updated when User.merchant_id column was added — simple omission in the dict literal."
+}
