@@ -10,6 +10,7 @@ import {
   Eye, EyeOff, RefreshCw, Bluetooth,
 } from "lucide-react";
 import { pairPrinter, directPrint, isPrinterConnected, pairedPrinterName, isPrinterSupported, buildSaleReceipt, buildShiftReport, buildKitchenTicket } from "@/utils/thermalPrinter";
+import { queueSale, drainQueue, queuedCount } from "@/utils/offlineQueue";
 import "@/App.css";
 
 const money = (n) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
@@ -64,6 +65,9 @@ function AdminApp() {
   const [category, setCategory] = useState("Semua");
   const [toast, setToast] = useState("");
   const [sidebar, setSidebar] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => (typeof window !== "undefined" && localStorage.getItem("mjd_sidebar_collapsed") === "1"));
+  const [branding, setBranding] = useState({ name: "MJD Kupi", theme_color: "#f97316", logo_url: "", banner_url: "" });
+  const [featureMatrix, setFeatureMatrix] = useState({}); // { "role:Kasir": {pos:true, kds:false}, "outlet:x": {...} }
   const [expenses, setExpenses] = useState([]);
   const [shift, setShift] = useState(null);
   const [showShiftOpen, setShowShiftOpen] = useState(false);
@@ -73,15 +77,30 @@ function AdminApp() {
   const [showReceipt, setShowReceipt] = useState(false);
   const [onlineOrders, setOnlineOrders] = useState([]);
   const [showOnlineOrders, setShowOnlineOrders] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [shiftReport, setShiftReport] = useState(null);
   const [brandLogo, setBrandLogo] = useState("");
+  const [offlineQueued, setOfflineQueued] = useState(0);
+  const [online, setOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   const prevOnlineIdsRef = useRef(new Set());
   const chimeRef = useRef(null);
   const printerRef = useRef(null);
 
   const notify = (text) => { setToast(text); window.setTimeout(() => setToast(""), 2500); };
   const role = session?.role;
-  const allowed = NAV_ITEMS.filter((n) => (NAV_BY_ROLE[role] || []).includes(n.id));
+  const toggleCollapsed = () => setCollapsed((c) => { const nx = !c; try { localStorage.setItem("mjd_sidebar_collapsed", nx ? "1" : "0"); } catch {} return nx; });
+  // Feature toggles: an item is DISABLED if any applicable rule sets it to false
+  const isFeatureAllowed = (id) => {
+    if (!featureMatrix || Object.keys(featureMatrix).length === 0) return true;
+    const roleKey = `role:${role}`;
+    const outletKey = `outlet:${session?.outlet_id}`;
+    const roleRule = featureMatrix[roleKey];
+    const outletRule = featureMatrix[outletKey];
+    if (roleRule && roleRule[id] === false) return false;
+    if (outletRule && outletRule[id] === false) return false;
+    return true;
+  };
+  const allowed = NAV_ITEMS.filter((n) => (NAV_BY_ROLE[role] || []).includes(n.id)).filter((n) => isFeatureAllowed(n.id));
 
   const reloadProducts = () => axios.get(`${API}/products`).then(({ data }) => setProducts(data.map((p) => ({ ...p, id: p.id, price: Number(p.price), cost: Number(p.cost), stock: Number(p.stock) })))).catch(() => {});
   const reloadMerchants = () => axios.get(`${API}/merchants`).then(({ data }) => setMerchants(data)).catch(() => {});
@@ -108,6 +127,13 @@ function AdminApp() {
     reloadProducts(); reloadMerchants(); reloadExpenses();
     axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {});
     axios.get(`${API}/settings/logo`).then(({ data }) => setBrandLogo(data?.logo_data || "")).catch(() => {});
+    axios.get(`${API}/branding/current`).then(({ data }) => {
+      setBranding(data);
+      try {
+        document.documentElement.style.setProperty("--brand-accent", data.theme_color || "#f97316");
+      } catch {}
+    }).catch(() => {});
+    axios.get(`${API}/feature-toggles`).then(({ data }) => setFeatureMatrix(data?.matrix || {})).catch(() => {});
     if (session.role === "Kasir") reloadShift();
     // Setup WebAudio chime
     chimeRef.current = () => {
@@ -121,12 +147,29 @@ function AdminApp() {
       } catch {}
     };
     // Poll online orders only for cashier/admin
-    if (["Kasir", "Merchant Admin", "Super Admin"].includes(session.role)) {
+    if (["Kasir", "Admin", "Super Admin"].includes(session.role)) {
       reloadOnlineOrders();
       const t = setInterval(reloadOnlineOrders, 4000);
       return () => clearInterval(t);
     }
   }, [session]);
+
+  useEffect(() => {
+    // Offline resilience: track connectivity + auto-drain queue on reconnect
+    const goOnline = async () => {
+      setOnline(true);
+      try {
+        const { synced, remaining } = await drainQueue(async (p) => { await axios.post(`${API}/sales`, p); });
+        setOfflineQueued(remaining);
+        if (synced > 0) { notify(`${synced} transaksi offline berhasil disinkronkan`); reloadProducts(); }
+      } catch {}
+    };
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    queuedCount().then(setOfflineQueued).catch(() => {});
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
+  }, []);
 
   const filtered = useMemo(
     () => products.filter((p) => (category === "Semua" || p.category === category) && p.name.toLowerCase().includes(query.toLowerCase())),
@@ -136,11 +179,19 @@ function AdminApp() {
   const tax = Math.round(subtotal * 0.1);
   const total = subtotal + tax;
 
-  const addToCart = (product) => setCart((cur) => {
-    const found = cur.find((i) => i.id === product.id);
-    return found ? cur.map((i) => i.id === product.id ? { ...i, qty: i.qty + 1 } : i) : [...cur, { ...product, qty: 1 }];
+  const addToCart = (product, variant = null, notes = "") => setCart((cur) => {
+    const key = variant ? `${product.id}__${variant.id}` : product.id;
+    const found = cur.find((i) => i.key === key && i.notes === notes);
+    if (found) return cur.map((i) => i === found ? { ...i, qty: i.qty + 1 } : i);
+    const price = variant ? Number(variant.price) : Number(product.price);
+    return [...cur, {
+      key, id: product.id, name: product.name, vendor: product.vendor, merchant_id: product.merchant_id,
+      color: product.color, image_url: product.image_url,
+      variant_id: variant?.id || null, variant_name: variant?.name || "", notes: notes || "",
+      price, qty: 1,
+    }];
   });
-  const adjustCart = (id, amount) => setCart((cur) => cur.map((i) => i.id === id ? { ...i, qty: i.qty + amount } : i).filter((i) => i.qty > 0));
+  const adjustCart = (key, amount) => setCart((cur) => cur.map((i) => i.key === key ? { ...i, qty: i.qty + amount } : i).filter((i) => i.qty > 0));
 
   const openPayment = () => {
     if (!cart.length) return;
@@ -149,24 +200,34 @@ function AdminApp() {
   };
 
   const confirmSale = async ({ method, reference, cashReceived }) => {
+    const payload = {
+      table: "Meja 07",
+      lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id, variant_id: i.variant_id || null, variant_name: i.variant_name || "", notes: i.notes || "" })),
+      subtotal, tax, total,
+      payment_method: method,
+      payment_reference: reference || "",
+      cash_received: Number(cashReceived) || 0,
+      change_amount: Math.max(0, (Number(cashReceived) || 0) - total),
+    };
     try {
-      const payload = {
-        table: "Meja 07",
-        lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id })),
-        subtotal, tax, total,
-        payment_method: method,
-        payment_reference: reference || "",
-        cash_received: Number(cashReceived) || 0,
-        change_amount: Math.max(0, (Number(cashReceived) || 0) - total),
-      };
-      const { data } = await axios.post(`${API}/sales`, payload);
+      const { data } = await axios.post(`${API}/sales`, payload, { timeout: 8000 });
       setLastSale({ ...payload, id: data.id, created_at: data.created_at });
       setShowPayment(false);
       setShowReceipt(true);
       await reloadProducts();
       notify("Transaksi berhasil, tiket dapur terkirim");
     } catch (e) {
-      notify(e.response?.data?.detail || "Gagal menyimpan transaksi");
+      // If network failure, queue offline
+      if (!navigator.onLine || e.code === "ECONNABORTED" || !e.response) {
+        await queueSale(payload);
+        const c = await queuedCount();
+        setOfflineQueued(c);
+        setShowPayment(false);
+        setCart([]);
+        notify(`Offline: transaksi disimpan di antrean (${c} pending sync)`);
+      } else {
+        notify(e.response?.data?.detail || "Gagal menyimpan transaksi");
+      }
     }
   };
 
@@ -176,17 +237,20 @@ function AdminApp() {
   const pageTitle = NAV_ITEMS.find((n) => n.id === page)?.label || "Ringkasan";
 
   return (
-    <div className="app-shell" data-testid="mjd-kupi-app">
-      <aside className={`sidebar ${sidebar ? "is-open" : ""}`} data-testid="main-sidebar">
+    <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`} data-testid="mjd-kupi-app">
+      <aside className={`sidebar ${sidebar ? "is-open" : ""} ${collapsed ? "collapsed" : ""}`} data-testid="main-sidebar">
         <div className="brand">
-          <div className="brand-mark" data-testid="brand-logo">{brandLogo ? <img src={brandLogo} alt="logo" /> : <Coffee size={19} />}</div>
-          <div><strong>MJD Kupi</strong><span>Retail Command Center</span></div>
+          <div className="brand-mark" data-testid="brand-logo">{(branding.logo_url || brandLogo) ? <img src={branding.logo_url || brandLogo} alt="logo" /> : <Coffee size={19} />}</div>
+          <div className="brand-text"><strong>{branding.name || "MJD Kupi"}</strong><span>Retail Command Center</span></div>
+          <button className="collapse-toggle" data-testid="collapse-sidebar-button" onClick={toggleCollapsed} title={collapsed ? "Perluas sidebar" : "Ciutkan sidebar"}>
+            <Menu size={16} />
+          </button>
           <button className="mobile-close" data-testid="close-sidebar-button" onClick={() => setSidebar(false)}><X size={18} /></button>
         </div>
         <div className="workspace-label">WORKSPACE</div>
-        <nav>
+        <nav className="sidebar-nav">
           {allowed.map(({ id, label, icon: Icon, live }) => (
-            <button key={id} className={page === id ? "nav-item active" : "nav-item"} data-testid={`nav-${id}`} onClick={() => { setPage(id); setSidebar(false); }}>
+            <button key={id} className={page === id ? "nav-item active" : "nav-item"} data-testid={`nav-${id}`} title={collapsed ? label : ""} onClick={() => { setPage(id); setSidebar(false); }}>
               <Icon size={18} /><span>{label}</span>{live && <em>Live</em>}
             </button>
           ))}
@@ -234,6 +298,7 @@ function AdminApp() {
               <ChevronDown size={14} />
             </div>
             <div className="role-chip" data-testid="current-user-role">{session.name} · {session.role}</div>
+            {(!online || offlineQueued > 0) && <div className="offline-chip" data-testid="offline-chip">{!online ? "🔌 OFFLINE" : `⏳ ${offlineQueued} pending`}</div>}
             <button className="icon-button" data-testid="notifications-button" onClick={() => notify("Tidak ada notifikasi baru")}><Bell size={18} /><i /></button>
             <div className="top-avatar">{session.name.slice(0, 2).toUpperCase()}</div>
           </div>
@@ -245,11 +310,12 @@ function AdminApp() {
             <POS products={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory}
                  cart={cart} addToCart={addToCart} adjustCart={adjustCart} subtotal={subtotal} tax={tax} total={total}
                  onPay={openPayment} shift={shift} role={session.role}
-                 onlineOrders={onlineOrders} openOnline={() => setShowOnlineOrders(true)} />
+                 onlineOrders={onlineOrders} openOnline={() => setShowOnlineOrders(true)}
+                 openHistory={() => setShowHistory(true)} />
           )}
           {page === "kds" && <KDS notify={notify} merchants={merchants} />}
           {page === "inventory" && <Inventory products={products} reload={reloadProducts} notify={notify} />}
-          {page === "expenses" && <Expenses expenses={expenses} reload={reloadExpenses} notify={notify} />}
+          {page === "expenses" && <Expenses expenses={expenses} reload={reloadExpenses} notify={notify} session={session} shift={shift} />}
           {page === "products" && <Products products={products} merchants={merchants} reload={reloadProducts} notify={notify} />}
           {page === "merchants" && <Merchants merchants={merchants} reload={reloadMerchants} notify={notify} />}
           {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} />}
@@ -268,6 +334,7 @@ function AdminApp() {
       {showPayment && <PaymentModal total={total} onClose={() => setShowPayment(false)} onConfirm={confirmSale} />}
       {showReceipt && lastSale && <ReceiptModal sale={lastSale} merchants={merchants} outlets={outlets} cashier={session?.name || ""} onClose={() => { setShowReceipt(false); setLastSale(null); setCart([]); }} notify={notify} />}
       {showOnlineOrders && <OnlineOrdersModal orders={onlineOrders} onClose={() => setShowOnlineOrders(false)} reload={reloadOnlineOrders} notify={notify} onAcceptDone={() => reloadProducts()} />}
+      {showHistory && <HistoryModal onClose={() => setShowHistory(false)} notify={notify} />}
       {shiftReport && <ShiftReportModal report={shiftReport} outlets={outlets} onClose={() => setShiftReport(null)} notify={notify} />}
     </div>
   );
@@ -329,28 +396,36 @@ function Overview({ products, expenses, setPage }) {
 }
 
 // -------- POS --------
-function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, onPay, shift, role, onlineOrders, openOnline }) {
+function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, onPay, shift, role, onlineOrders, openOnline, openHistory }) {
+  const locked = role === "Kasir" && !shift;
+  const [variantPick, setVariantPick] = useState(null); // { product }
+  const handleProductClick = (p) => {
+    const active = (p.variants || []).filter((v) => v.active !== false);
+    if (active.length > 0) setVariantPick(p);
+    else addToCart(p);
+  };
   return <>
     <SectionHeader eyebrow={shift ? `SHIFT AKTIF · Kas awal ${money(shift.opening_cash)}` : "TERMINAL KASIR"} title="Pesanan baru"
       description="Pilih menu, atur jumlah, lalu selesaikan pembayaran."
       action={<div className="pos-actions">
-        <button className={`online-btn ${(onlineOrders?.length || 0) > 0 ? "has-new" : ""}`} onClick={openOnline} data-testid="online-orders-button">
+        <button className="online-btn" onClick={openHistory} data-testid="history-button" disabled={locked}><FileText size={15} /> History Kasir</button>
+        <button className={`online-btn ${(onlineOrders?.length || 0) > 0 ? "has-new" : ""}`} onClick={openOnline} disabled={locked} data-testid="online-orders-button">
           <QrCode size={15} /> Pesanan Online
           {(onlineOrders?.length || 0) > 0 && <span className="badge">{onlineOrders.length}</span>}
         </button>
         <div className="live-pill"><i /> Terminal online</div>
       </div>} />
-    {role === "Kasir" && !shift && <div className="warn-banner" data-testid="pos-shift-warning">⚠️ Shift belum dibuka. Klik "Buka Shift" di sidebar untuk mulai bertransaksi.</div>}
-    <div className="pos-layout">
+    {locked && <div className="warn-banner" data-testid="pos-shift-warning">🔒 Terminal terkunci. Buka Shift di sidebar untuk mulai bertransaksi.</div>}
+    <div className={`pos-layout ${locked ? "locked" : ""}`} data-testid="pos-layout">
       <section className="menu-area">
         <div className="menu-tools">
-          <div className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cari menu atau scan barcode..." data-testid="pos-product-search" /></div>
-          <div className="category-tabs">{["Semua", "Kopi", "Makanan", "Snack", "Non-Kopi"].map((c) => <button className={category === c ? "selected" : ""} key={c} onClick={() => setCategory(c)} data-testid={`category-${c.toLowerCase()}`}>{c}</button>)}</div>
+          <div className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cari menu atau scan barcode..." disabled={locked} data-testid="pos-product-search" /></div>
+          <div className="category-tabs">{["Semua", "Kopi", "Makanan", "Snack", "Non-Kopi"].map((c) => <button className={category === c ? "selected" : ""} key={c} onClick={() => setCategory(c)} disabled={locked} data-testid={`category-${c.toLowerCase()}`}>{c}</button>)}</div>
         </div>
         <div className="product-grid">
-          {products.map((p) => <button className="product-card" key={p.id} onClick={() => addToCart(p)} data-testid={`product-card-${p.id}`}>
+          {products.map((p) => <button className="product-card" key={p.id} onClick={() => handleProductClick(p)} disabled={locked} data-testid={`product-card-${p.id}`}>
             <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={30} />}<span>{p.stock} stok</span></div>
-            <div className="product-info"><b>{p.name}</b><span>{p.vendor}</span><strong>{money(p.price)}</strong></div>
+            <div className="product-info"><b>{p.name}</b><span>{p.vendor}{(p.variants||[]).filter(v=>v.active!==false).length>0 && ` · ${(p.variants||[]).filter(v=>v.active!==false).length} varian`}</span><strong>{money(p.price)}</strong></div>
             <div className="add-product"><Plus size={17} /></div>
           </button>)}
         </div>
@@ -358,23 +433,25 @@ function POS({ products, query, setQuery, category, setCategory, cart, addToCart
       <aside className="cart-panel">
         <div className="cart-head">
           <div><h2>Keranjang</h2><span data-testid="cart-item-count">{cart.reduce((a, i) => a + i.qty, 0)} item · Meja 07</span></div>
-          <button className="clear-btn" onClick={() => cart.forEach((i) => adjustCart(i.id, -i.qty))} data-testid="clear-cart-button">Bersihkan</button>
+          <button className="clear-btn" onClick={() => cart.forEach((i) => adjustCart(i.key, -i.qty))} data-testid="clear-cart-button">Bersihkan</button>
         </div>
         <div className="cart-items">
-          {cart.length ? cart.map((item) => <div className="cart-item" key={item.id}>
-            <div className="mini-art" style={{ background: item.color }}><Coffee size={16} /></div>
-            <div><b>{item.name}</b><span>{money(item.price)}</span>
+          {cart.length ? cart.map((item) => <div className="cart-item pro" key={item.key} data-testid={`cart-line-${item.key}`}>
+            <div className="mini-art" style={{ background: item.color }}>{item.image_url ? <img src={item.image_url} alt="" /> : <Coffee size={16} />}</div>
+            <div className="cart-body">
+              <div className="cart-title"><b>{item.name}</b>{item.variant_name && <em className="var-chip">{item.variant_name}</em>}</div>
+              {item.notes && <div className="cart-notes">📝 {item.notes}</div>}
+              <div className="cart-price-row"><span>{money(item.price)} × {item.qty}</span><strong>{money(item.price * item.qty)}</strong></div>
               <div className="qty">
-                <button onClick={() => adjustCart(item.id, -1)} data-testid={`decrease-${item.id}`}>−</button>
+                <button onClick={() => adjustCart(item.key, -1)} data-testid={`decrease-${item.key}`}>−</button>
                 <strong>{item.qty}</strong>
-                <button onClick={() => adjustCart(item.id, 1)} data-testid={`increase-${item.id}`}>+</button>
+                <button onClick={() => adjustCart(item.key, 1)} data-testid={`increase-${item.key}`}>+</button>
               </div>
             </div>
-            <em>{money(item.price * item.qty)}</em>
           </div>) : <div className="empty-cart"><ShoppingCart size={26} /><b>Keranjang masih kosong</b><span>Pilih menu untuk memulai pesanan</span></div>}
         </div>
         <div className="cart-summary">
-          <div><span>Subtotal</span><b>{money(subtotal)}</b></div>
+          <div><span>Subtotal ({cart.reduce((a, i) => a + i.qty, 0)} item)</span><b>{money(subtotal)}</b></div>
           <div><span>PPN (10%)</span><b>{money(tax)}</b></div>
           <div className="total-line"><span>Total pembayaran</span><strong>{money(total)}</strong></div>
           <button className="pay-btn" disabled={!cart.length} onClick={onPay} data-testid="pay-order-button"><CreditCard size={17} /> Bayar sekarang <span>→</span></button>
@@ -382,7 +459,31 @@ function POS({ products, query, setQuery, category, setCategory, cart, addToCart
         </div>
       </aside>
     </div>
+    {variantPick && <VariantPickerModal product={variantPick} onClose={() => setVariantPick(null)} onAdd={(variant, notes) => { addToCart(variantPick, variant, notes); setVariantPick(null); }} />}
   </>;
+}
+
+function VariantPickerModal({ product, onClose, onAdd }) {
+  const [pick, setPick] = useState((product.variants || []).find((v) => v.active !== false));
+  const [notes, setNotes] = useState("");
+  return <div className="modal-backdrop">
+    <div className="pay-modal" data-testid="variant-picker-modal">
+      <button className="modal-close" onClick={onClose}><X size={18}/></button>
+      <div className="pay-head"><h2>{product.name}</h2><span>Pilih varian & catatan khusus</span></div>
+      <div className="variant-picks">
+        {(product.variants || []).filter(v => v.active !== false).map((v) => (
+          <button key={v.id} className={`var-pick ${pick?.id === v.id ? "active" : ""}`} onClick={() => setPick(v)} data-testid={`pick-variant-${v.id}`}>
+            <b>{v.name}</b><strong>{money(v.price)}</strong>
+          </button>
+        ))}
+      </div>
+      <div className="pay-body">
+        <label>Catatan Khusus (opsional)</label>
+        <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Less sugar / Tanpa es / Extra hot" data-testid="variant-notes-input" />
+      </div>
+      <button className="primary-btn full" disabled={!pick} onClick={() => onAdd(pick, notes)} data-testid="add-variant-to-cart"><Plus size={15}/> Tambahkan ke Keranjang · {money(pick?.price || 0)}</button>
+    </div>
+  </div>;
 }
 
 // -------- Payment Modal (multi-channel) --------
@@ -629,25 +730,31 @@ function Inventory({ products, reload, notify }) {
 }
 function StockModal({ title, products, kind, onClose, onSubmit }) {
   const [pid, setPid] = useState(products[0]?.id || "");
-  const [qty, setQty] = useState(kind === "out" ? 1 : 10);
+  const [qty, setQty] = useState("");
   const [note, setNote] = useState("");
+  const [search, setSearch] = useState("");
+  const filtered = useMemo(() => products.filter((p) => p.name.toLowerCase().includes(search.toLowerCase())), [products, search]);
+  useEffect(() => { if (filtered.length && !filtered.find((p) => p.id === pid)) setPid(filtered[0].id); }, [filtered]);
+  const submit = () => { const n = Number(qty); if (!n && kind !== "opname") return; onSubmit(pid, n || 0, note); };
   return <div className="modal-backdrop"><div className="pay-modal" data-testid="stock-modal">
     <button className="modal-close" onClick={onClose}><X size={18} /></button>
     <div className="pay-head"><h2>{title}</h2><span>Riwayat tersimpan otomatis</span></div>
     <div className="pay-body">
+      <label>Cari produk</label>
+      <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari nama produk..." data-testid="stock-search-input" />
       <label>Produk</label>
-      <select value={pid} onChange={(e) => setPid(e.target.value)} data-testid="stock-product-select">{products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+      <select value={pid} onChange={(e) => setPid(e.target.value)} data-testid="stock-product-select">{filtered.map((p) => <option key={p.id} value={p.id}>{p.name} (stok {p.stock})</option>)}</select>
       <label>{kind === "opname" ? "Stok fisik aktual" : "Jumlah"}</label>
-      <input type="number" value={qty} onChange={(e) => setQty(Number(e.target.value))} data-testid="stock-qty-input" />
+      <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Masukkan angka" data-testid="stock-qty-input" />
       <label>Catatan</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Nomor nota / alasan" data-testid="stock-note-input" />
     </div>
-    <button className="primary-btn full" onClick={() => onSubmit(pid, qty, note)} data-testid="stock-submit-button">Simpan</button>
+    <button className="primary-btn full" onClick={submit} data-testid="stock-submit-button">Simpan</button>
   </div></div>;
 }
 
 // -------- Expenses --------
-function Expenses({ expenses, reload, notify }) {
+function Expenses({ expenses, reload, notify, session, shift }) {
   const [showAdd, setShowAdd] = useState(false);
   return <>
     <SectionHeader eyebrow="CASH CONTROL" title="Buku pengeluaran" description="Catat dan pantau seluruh biaya operasional outlet."
@@ -663,24 +770,33 @@ function Expenses({ expenses, reload, notify }) {
         {expenses.map((e) => <div className="table-row" key={e.id}><span><b>{e.category}</b></span><span>{e.note}</span><span>{e.date}</span><span><span className="method-badge">{e.method}</span></span><span><b>{money(e.amount)}</b></span><button className="more-btn" data-testid={`expense-menu-${e.id}`}>•••</button></div>)}
       </div>
     </section>
-    {showAdd && <ExpenseModal onClose={() => setShowAdd(false)} onSaved={() => { reload(); notify("Pengeluaran tersimpan"); }} />}
+    {showAdd && <ExpenseModal onClose={() => setShowAdd(false)} onSaved={() => { reload(); notify("Pengeluaran tersimpan"); }} session={session} shift={shift} />}
   </>;
 }
-function ExpenseModal({ onClose, onSaved }) {
-  const [form, setForm] = useState({ category: "Pembelian Bahan Baku", note: "", amount: 0, date: new Date().toISOString().slice(0, 10), method: "Cash" });
-  const save = async () => { await axios.post(`${API}/expenses`, form); onSaved(); onClose(); };
+function ExpenseModal({ onClose, onSaved, session, shift }) {
+  const [form, setForm] = useState({ category: "Pembelian Bahan Baku", note: "", amount: "", date: new Date().toISOString().slice(0, 10), method: "Cash" });
+  const save = async () => {
+    const amt = Number(form.amount);
+    if (!amt) return alert("Nominal wajib diisi");
+    await axios.post(`${API}/expenses`, { ...form, amount: amt });
+    onSaved(); onClose();
+  };
   return <div className="modal-backdrop"><div className="pay-modal" data-testid="expense-modal">
     <button className="modal-close" onClick={onClose}><X size={18} /></button>
     <div className="pay-head"><h2>Catat pengeluaran</h2><span>Otomatis masuk P&L</span></div>
     <div className="pay-body">
+      {session && <div className="bind-info" data-testid="expense-bind-info">
+        <b>Pencatat</b> <span>{session.name} ({session.role})</span>
+        {shift && <><b>Shift ID</b><span className="mono">{String(shift.id).slice(-8).toUpperCase()}</span></>}
+      </div>}
       <label>Kategori</label>
       <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="expense-category-select">
         {["Sewa Tempat", "Gaji Karyawan", "Listrik & Air", "Pembelian Bahan Baku", "Transportasi/Kurir", "Maintenance", "Lain-Lain"].map((c) => <option key={c}>{c}</option>)}
       </select>
       <label>Keterangan</label>
       <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} data-testid="expense-note-input" />
-      <label>Nominal</label>
-      <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} data-testid="expense-amount-input" />
+      <label>Nominal (Rp)</label>
+      <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="Masukkan nominal" data-testid="expense-amount-input" />
       <label>Tanggal</label>
       <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} data-testid="expense-date-input" />
       <label>Metode</label>
@@ -692,21 +808,25 @@ function ExpenseModal({ onClose, onSaved }) {
 
 // -------- Products --------
 function Products({ products, merchants, reload, notify }) {
-  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: 0, cost: 0, stock: 0, color: "#ffedd5", image_url: "" });
+  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: "", cost: "", stock: "", color: "#ffedd5", image_url: "", variants: [] });
+  const [editVariants, setEditVariants] = useState(null); // { productId, variants: [] }
   useEffect(() => { if (!form.merchant_id && merchants.length) setForm((f) => ({ ...f, merchant_id: merchants[0].id })); }, [merchants]);
   const save = async () => {
     if (!form.name) return notify("Nama produk wajib diisi");
     const vendor = merchants.find((m) => m.id === form.merchant_id)?.name || "MJD Kupi";
-    await axios.post(`${API}/products`, { ...form, vendor });
-    setForm({ ...form, name: "", price: 0, cost: 0, stock: 0, image_url: "" });
+    await axios.post(`${API}/products`, { ...form, vendor, price: Number(form.price) || 0, cost: Number(form.cost) || 0, stock: Number(form.stock) || 0, variants: form.variants || [] });
+    setForm({ ...form, name: "", price: "", cost: "", stock: "", image_url: "", variants: [] });
     reload(); notify("Produk berhasil ditambahkan");
   };
   const handleImage = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setForm({ ...form, image_url: r.result }); r.readAsDataURL(f); };
+  const addFormVariant = () => setForm({ ...form, variants: [...(form.variants || []), { name: "", price: Number(form.price) || 0, cost: Number(form.cost) || 0, active: true }] });
+  const updFormVariant = (i, patch) => setForm({ ...form, variants: form.variants.map((v, idx) => idx === i ? { ...v, ...patch } : v) });
+  const rmFormVariant = (i) => setForm({ ...form, variants: form.variants.filter((_, idx) => idx !== i) });
   return <>
     <SectionHeader eyebrow="CATALOG & COSTING" title="Produk & HPP" description="Bangun katalog menu dan jaga margin setiap porsi."
       action={<button className="primary-btn" data-testid="new-product-button" onClick={() => document.querySelector("#new-product")?.focus()}><Plus size={16} /> Produk baru</button>} />
     <div className="product-form-v2 panel">
-      <div className="form-heading"><div className="form-icon"><ClipboardList size={18} /></div><div><h2>Tambah menu cepat</h2><span>Bind ke merchant / tenant · unggah foto produk</span></div></div>
+      <div className="form-heading"><div className="form-icon"><ClipboardList size={18} /></div><div><h2>Tambah menu cepat</h2><span>Bind ke merchant / tenant · unggah foto produk · varian harga</span></div></div>
       <div className="product-form-grid">
         <div className="product-image-picker">
           <label className="image-drop" data-testid="product-image-label">
@@ -718,26 +838,84 @@ function Products({ products, merchants, reload, notify }) {
           <label className="field-lg"><span>Nama produk</span><input id="new-product" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Contoh: Es Kopi Pandan" data-testid="product-name-input" /></label>
           <label><span>Merchant</span><select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
           <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
-          <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} data-testid="product-price-input" /></label>
-          <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: Number(e.target.value) })} data-testid="product-cost-input" /></label>
-          <label><span>Stok awal</span><input type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} data-testid="product-stock-input" /></label>
-          <button className="primary-btn full-row" onClick={save} data-testid="save-product-button"><Plus size={14}/> Simpan produk</button>
+          <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} placeholder="0" data-testid="product-price-input" /></label>
+          <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} placeholder="0" data-testid="product-cost-input" /></label>
+          <label><span>Stok awal</span><input type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} placeholder="0" data-testid="product-stock-input" /></label>
         </div>
       </div>
+      <div className="variant-editor" data-testid="variant-editor">
+        <div className="ve-head"><b>Varian Produk (opsional)</b><span>Contoh: Panas / Ice, Reg / Large — bisa harga & HPP berbeda</span>
+          <button className="outline-btn" type="button" onClick={addFormVariant} data-testid="add-variant-button"><Plus size={13}/> Tambah Varian</button>
+        </div>
+        {(form.variants || []).length > 0 && <div className="ve-rows">
+          <div className="ve-row ve-label"><span>Nama Varian</span><span>Harga Jual</span><span>HPP</span><span>Aktif</span><span /></div>
+          {form.variants.map((v, i) => (
+            <div className="ve-row" key={i}>
+              <input value={v.name} onChange={(e) => updFormVariant(i, { name: e.target.value })} placeholder="Panas / Ice / Large" data-testid={`variant-name-${i}`} />
+              <input type="number" value={v.price} onChange={(e) => updFormVariant(i, { price: Number(e.target.value) })} data-testid={`variant-price-${i}`} />
+              <input type="number" value={v.cost} onChange={(e) => updFormVariant(i, { cost: Number(e.target.value) })} data-testid={`variant-cost-${i}`} />
+              <label className="switch"><input type="checkbox" checked={v.active !== false} onChange={(e) => updFormVariant(i, { active: e.target.checked })} /><i /></label>
+              <button className="icon-danger" type="button" onClick={() => rmFormVariant(i)} data-testid={`remove-variant-${i}`}><Trash2 size={13}/></button>
+            </div>
+          ))}
+        </div>}
+      </div>
+      <button className="primary-btn full-row" onClick={save} data-testid="save-product-button"><Plus size={14}/> Simpan produk</button>
     </div>
     <div className="catalog-grid">
       {products.map((p) => <div className="catalog-item" key={p.id}>
         <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={26} />}</div>
-        <div><b>{p.name}</b><span>{p.vendor} · {p.category}</span><small>Margin <strong>{p.price ? Math.round((1 - p.cost / p.price) * 100) : 0}%</strong> · Stok {p.stock}</small></div>
-        <button className="more-btn" onClick={async () => { if (window.confirm(`Hapus ${p.name}?`)) { await axios.delete(`${API}/products/${p.id}`); reload(); notify("Produk dihapus"); } }} data-testid={`product-menu-${p.id}`}><Trash2 size={13} /></button>
+        <div><b>{p.name}</b><span>{p.vendor} · {p.category}</span>
+          <small>Margin <strong>{p.price ? Math.round((1 - p.cost / p.price) * 100) : 0}%</strong> · Stok {p.stock}
+            {(p.variants || []).length > 0 && <em className="variant-chip"> · {p.variants.length} varian</em>}
+          </small>
+        </div>
+        <div className="cat-actions">
+          <button className="small-action" onClick={() => setEditVariants({ productId: p.id, name: p.name, variants: p.variants || [] })} data-testid={`edit-variants-${p.id}`}><Settings2 size={12}/> Varian</button>
+          <button className="more-btn" onClick={async () => { if (window.confirm(`Hapus ${p.name}?`)) { await axios.delete(`${API}/products/${p.id}`); reload(); notify("Produk dihapus"); } }} data-testid={`product-menu-${p.id}`}><Trash2 size={13} /></button>
+        </div>
       </div>)}
     </div>
+    {editVariants && <VariantEditModal product={editVariants} onClose={() => setEditVariants(null)} onSaved={() => { setEditVariants(null); reload(); notify("Varian tersimpan"); }} />}
   </>;
+}
+
+function VariantEditModal({ product, onClose, onSaved }) {
+  const [rows, setRows] = useState(product.variants || []);
+  const add = () => setRows([...rows, { name: "", price: 0, cost: 0, active: true }]);
+  const upd = (i, patch) => setRows(rows.map((v, idx) => idx === i ? { ...v, ...patch } : v));
+  const rm = (i) => setRows(rows.filter((_, idx) => idx !== i));
+  const save = async () => {
+    try {
+      await axios.put(`${API}/products/${product.productId}`, { name: product.name, variants: rows });
+      onSaved();
+    } catch (e) { alert(e.response?.data?.detail || "Gagal simpan varian"); }
+  };
+  return <div className="modal-backdrop"><div className="pay-modal wide" data-testid="variant-modal">
+    <button className="modal-close" onClick={onClose}><X size={18}/></button>
+    <div className="pay-head"><h2>Kelola Varian</h2><span>{product.name}</span></div>
+    <div className="ve-rows">
+      <div className="ve-row ve-label"><span>Nama Varian</span><span>Harga Jual</span><span>HPP</span><span>Aktif</span><span/></div>
+      {rows.map((v, i) => <div className="ve-row" key={i}>
+        <input value={v.name} onChange={(e) => upd(i, { name: e.target.value })} placeholder="Panas / Ice / Large" data-testid={`edit-var-name-${i}`}/>
+        <input type="number" value={v.price} onChange={(e) => upd(i, { price: Number(e.target.value) })} data-testid={`edit-var-price-${i}`}/>
+        <input type="number" value={v.cost} onChange={(e) => upd(i, { cost: Number(e.target.value) })} data-testid={`edit-var-cost-${i}`}/>
+        <label className="switch"><input type="checkbox" checked={v.active !== false} onChange={(e) => upd(i, { active: e.target.checked })}/><i/></label>
+        <button className="icon-danger" onClick={() => rm(i)}><Trash2 size={13}/></button>
+      </div>)}
+      {rows.length === 0 && <div className="empty-hint">Belum ada varian. Klik "Tambah Varian" untuk mulai.</div>}
+    </div>
+    <div className="modal-actions">
+      <button className="outline-btn" onClick={add} data-testid="add-variant-modal-button"><Plus size={13}/> Tambah Varian</button>
+      <button className="primary-btn" onClick={save} data-testid="save-variants-button"><Check size={14}/> Simpan</button>
+    </div>
+  </div></div>;
 }
 
 // -------- Merchants --------
 function Merchants({ merchants, reload, notify }) {
   const [form, setForm] = useState({ name: "", category: "F&B", commission_percent: 10, phone: "", color: "#ffedd5" });
+  const [editing, setEditing] = useState(null);
   const save = async () => {
     if (!form.name) return notify("Nama merchant wajib diisi");
     await axios.post(`${API}/merchants`, form);
@@ -746,10 +924,10 @@ function Merchants({ merchants, reload, notify }) {
   };
   const remove = async (m) => { if (!window.confirm(`Hapus merchant ${m.name}?`)) return; try { await axios.delete(`${API}/merchants/${m.id}`); reload(); notify("Merchant dihapus"); } catch (e) { notify(e.response?.data?.detail || "Gagal menghapus"); } };
   return <>
-    <SectionHeader eyebrow="TENANT MANAGEMENT" title="Merchant & Tenant" description="Kelola vendor / tenant, komisi, dan nomor WhatsApp dapur."
+    <SectionHeader eyebrow="TENANT & WHITE-LABEL" title="Merchant & Mitra Toko" description="Kelola mitra, komisi, branding kustom, dan status langganan SaaS."
       action={<div className="live-pill"><i /> {merchants.length} tenant aktif</div>} />
     <div className="product-form panel">
-      <div className="form-heading"><div className="form-icon"><Store size={18} /></div><div><h2>Tambah merchant / tenant</h2><span>Terhubung ke produk & tiket dapur</span></div></div>
+      <div className="form-heading"><div className="form-icon"><Store size={18} /></div><div><h2>Tambah merchant / tenant</h2><span>Setelah tersimpan, klik "Edit White-Label" untuk konfigurasi identitas mitra.</span></div></div>
       <div className="form-fields">
         <label>Nama<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="merchant-name-input" /></label>
         <label>Kategori<select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="merchant-category-select">{["F&B", "Kopi", "Makanan", "Snack", "Minuman"].map((c) => <option key={c}>{c}</option>)}</select></label>
@@ -759,18 +937,124 @@ function Merchants({ merchants, reload, notify }) {
       </div>
     </div>
     <section className="panel table-panel">
-      <div className="panel-head"><div><h2>Merchant terdaftar</h2><span>Sinkron ke katalog produk</span></div></div>
+      <div className="panel-head"><div><h2>Merchant terdaftar</h2><span>Klik "White-Label" untuk custom branding, subscription, & feature access</span></div></div>
       <div className="data-table">
-        <div className="table-row table-label"><span>Merchant</span><span>Kategori</span><span>Komisi</span><span>WhatsApp</span><span>Status</span><span /></div>
-        {merchants.map((m) => <div className="table-row" key={m.id}>
-          <span className="table-product"><div className="product-dot" style={{ background: m.color }}><Store size={14} /></div><b>{m.name}</b></span>
-          <span>{m.category}</span><span>{m.commission_percent}%</span><span>{m.phone || "—"}</span>
+        <div className="table-row wl-row table-label"><span>Merchant</span><span>Kategori</span><span>Komisi</span><span>Slug/Domain</span><span>Subscription</span><span>Status</span><span /></div>
+        {merchants.map((m) => <div className="table-row wl-row" key={m.id} data-testid={`merchant-row-${m.id}`}>
+          <span className="table-product">
+            <div className="product-dot" style={{ background: m.theme_color || m.color || "#ffedd5" }}>{m.logo_url ? <img src={m.logo_url} alt="" style={{width:22,height:22,borderRadius:6}}/> : <Store size={14} />}</div>
+            <b>{m.name}</b>
+          </span>
+          <span>{m.category}</span>
+          <span>{m.commission_percent}%</span>
+          <span className="mono-small">{m.slug ? `${m.slug}.mjdkupi.com` : "—"}</span>
+          <span><i className={`status-dot ${m.subscription_status === "active" ? "good" : m.subscription_status === "suspended" ? "low" : "warn"}`} />{m.subscription_status || "active"}</span>
           <span><i className={`status-dot ${m.active ? "good" : "low"}`} />{m.active ? "Aktif" : "Nonaktif"}</span>
-          <button className="small-action" onClick={() => remove(m)} data-testid={`delete-merchant-${m.id}`}><Trash2 size={12} /> Hapus</button>
+          <span className="wl-actions">
+            <button className="small-action" onClick={() => setEditing(m)} data-testid={`edit-merchant-${m.id}`}><Settings2 size={12}/> White-Label</button>
+            <button className="small-action" onClick={() => remove(m)} data-testid={`delete-merchant-${m.id}`}><Trash2 size={12} /> Hapus</button>
+          </span>
         </div>)}
       </div>
     </section>
+    {editing && <WhiteLabelModal merchant={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); notify("White-Label mitra tersimpan"); }} />}
   </>;
+}
+
+function WhiteLabelModal({ merchant, onClose, onSaved }) {
+  const [f, setF] = useState({
+    name: merchant.name || "",
+    category: merchant.category || "F&B",
+    commission_percent: merchant.commission_percent || 10,
+    phone: merchant.phone || "",
+    color: merchant.color || "#ffedd5",
+    active: merchant.active !== false,
+    slug: merchant.slug || "",
+    logo_url: merchant.logo_url || "",
+    theme_color: merchant.theme_color || "#f97316",
+    banner_url: merchant.banner_url || "",
+    receipt_header: merchant.receipt_header || "",
+    receipt_footer: merchant.receipt_footer || "",
+    wifi_password: merchant.wifi_password || "",
+    subscription_status: merchant.subscription_status || "active",
+    features_enabled: merchant.features_enabled || {},
+  });
+  const setFile = (key) => (e) => { const file = e.target.files?.[0]; if (!file) return; const r = new FileReader(); r.onload = () => setF((s) => ({ ...s, [key]: r.result })); r.readAsDataURL(file); };
+  const toggleFeature = (k) => setF((s) => ({ ...s, features_enabled: { ...s.features_enabled, [k]: s.features_enabled[k] === false ? true : false } }));
+  const save = async () => {
+    try {
+      await axios.put(`${API}/merchants/${merchant.id}`, f);
+      onSaved();
+    } catch (e) { alert(e.response?.data?.detail || "Gagal simpan"); }
+  };
+  const FEATURES_M = [
+    { key: "pos", label: "Akses Terminal POS" },
+    { key: "self_order", label: "Customer Self-Order QR" },
+    { key: "kds", label: "Kitchen Display (KDS)" },
+    { key: "multi_merchant", label: "Multi-Merchant/Tenant" },
+    { key: "reports", label: "Laporan Keuangan & HPP" },
+    { key: "inventory", label: "Inventori & Stok Opname" },
+  ];
+  return <div className="modal-backdrop"><div className="pay-modal wl-modal" data-testid="white-label-modal">
+    <button className="modal-close" onClick={onClose}><X size={18}/></button>
+    <div className="pay-head"><h2>White-Label · {merchant.name}</h2><span>Konfigurasi identitas 100% brand mitra</span></div>
+    <div className="wl-grid">
+      <div className="wl-col">
+        <div className="wl-section">
+          <b>Identitas & Domain</b>
+          <label>Nama Mitra / Nama Usaha<input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} data-testid="wl-name"/></label>
+          <label>Slug / Subdomain <em>(huruf kecil, tanpa spasi)</em><input value={f.slug} onChange={(e) => setF({ ...f, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "") })} placeholder="acehjaya" data-testid="wl-slug"/></label>
+          <div className="mono-small">→ {f.slug ? `${f.slug}.mjdkupi.com` : "belum diisi"}</div>
+          <label>WhatsApp<input value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} placeholder="6281100000000"/></label>
+        </div>
+        <div className="wl-section">
+          <b>Branding Visual</b>
+          <label>Warna Aksen<input type="color" value={f.theme_color} onChange={(e) => setF({ ...f, theme_color: e.target.value })} data-testid="wl-color"/></label>
+          <label>Logo Mitra (PNG/JPG)
+            {f.logo_url && <img src={f.logo_url} alt="logo" className="wl-preview"/>}
+            <input type="file" accept="image/*" onChange={setFile("logo_url")} data-testid="wl-logo-input"/>
+          </label>
+          <label>Banner Promosi Self-Order
+            {f.banner_url && <img src={f.banner_url} alt="banner" className="wl-preview banner"/>}
+            <input type="file" accept="image/*" onChange={setFile("banner_url")} data-testid="wl-banner-input"/>
+          </label>
+        </div>
+      </div>
+      <div className="wl-col">
+        <div className="wl-section">
+          <b>Struk & Wi-Fi</b>
+          <label>Header Struk<textarea rows={2} value={f.receipt_header} onChange={(e) => setF({ ...f, receipt_header: e.target.value })} placeholder="Alamat, No. Telp"/></label>
+          <label>Footer Struk<textarea rows={2} value={f.receipt_footer} onChange={(e) => setF({ ...f, receipt_footer: e.target.value })} placeholder="Terima kasih atas kunjungannya"/></label>
+          <label>Password Wi-Fi<input value={f.wifi_password} onChange={(e) => setF({ ...f, wifi_password: e.target.value })} placeholder="kopi123"/></label>
+        </div>
+        <div className="wl-section">
+          <b>Subscription / Masa Aktif</b>
+          <label>Status<select value={f.subscription_status} onChange={(e) => setF({ ...f, subscription_status: e.target.value })} data-testid="wl-sub-status">
+            <option value="active">Aktif</option>
+            <option value="trial">Trial</option>
+            <option value="pending">Pending</option>
+            <option value="suspended">Suspend (blokir login)</option>
+          </select></label>
+        </div>
+        <div className="wl-section">
+          <b>Paket Fitur (SaaS Toggle)</b>
+          <div className="wl-features">
+            {FEATURES_M.map((ft) => {
+              const on = f.features_enabled[ft.key] !== false;
+              return <label key={ft.key} className={`ft-cell mini ${on ? "on" : "off"}`} data-testid={`wl-feat-${ft.key}`}>
+                <input type="checkbox" checked={on} onChange={() => toggleFeature(ft.key)}/>
+                <b>{ft.label}</b><span>{on ? "Aktif" : "Nonaktif"}</span>
+              </label>;
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+    <div className="modal-actions">
+      <button className="outline-btn" onClick={onClose}>Batal</button>
+      <button className="primary-btn" onClick={save} data-testid="save-white-label"><Check size={14}/> Simpan White-Label</button>
+    </div>
+  </div></div>;
 }
 
 // -------- Reports --------
@@ -997,20 +1281,167 @@ function SettingsPage({ notify, role }) {
         </div>
       </section>
     </>}
+    {(role === "Super Admin" || role === "Admin") && <PaymentSettings notify={notify} />}
+    {(role === "Super Admin" || role === "Admin") && <PinGenerator notify={notify} />}
+    {isSuper && <FeatureToggleMatrix notify={notify} outlets={outlets} />}
   </>;
 }
 
-// -------- User & Security Management (Super Admin ONLY) --------
+// -------- Feature Toggle Matrix (Super Admin only) --------
+const ROLE_LIST = ["Super Admin", "Admin", "Kasir", "Vendor"];
+const FEATURE_LIST = [
+  { key: "pos", label: "Terminal POS" },
+  { key: "self_order", label: "Customer Self-Order" },
+  { key: "kds", label: "Kitchen Display (KDS)" },
+  { key: "inventory", label: "Inventori & Stok" },
+  { key: "expenses", label: "Pengeluaran" },
+  { key: "reports", label: "Laporan Keuangan" },
+  { key: "products", label: "Produk & HPP" },
+  { key: "merchants", label: "Merchant/Tenant" },
+  { key: "cashiers", label: "Monitoring Kasir" },
+  { key: "tables", label: "QR Meja" },
+  { key: "vendor_center", label: "Pusat Vendor" },
+  { key: "users", label: "User & Security" },
+  { key: "settings", label: "Pengaturan Sistem" },
+];
+
+function FeatureToggleMatrix({ notify, outlets }) {
+  const [matrix, setMatrix] = useState({});
+  const [mode, setMode] = useState("role"); // role | outlet
+  const [target, setTarget] = useState("Kasir");
+  useEffect(() => {
+    axios.get(`${API}/feature-toggles`).then(({ data }) => setMatrix(data?.matrix || {})).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (mode === "outlet" && outlets?.length && !outlets.some(o => o.id === target)) setTarget(outlets[0].id);
+    if (mode === "role" && !ROLE_LIST.includes(target)) setTarget("Kasir");
+  }, [mode, outlets]);
+  const key = mode === "role" ? `role:${target}` : `outlet:${target}`;
+  const scope = matrix[key] || {};
+  const toggle = (fkey) => setMatrix((m) => {
+    const cur = { ...(m[key] || {}) };
+    cur[fkey] = cur[fkey] === false ? true : false;
+    return { ...m, [key]: cur };
+  });
+  const save = async () => {
+    try { await axios.post(`${API}/feature-toggles`, { matrix }); notify("Feature toggles tersimpan — akan berlaku setelah user login berikutnya"); }
+    catch (e) { notify(e.response?.data?.detail || "Gagal simpan"); }
+  };
+  return <section className="panel product-form-v2" data-testid="feature-toggle-panel">
+    <div className="form-heading"><div className="form-icon"><Shield size={18}/></div>
+      <div><h2>Feature Access Control</h2><span>Aktif/Non-aktifkan modul per Role atau per Outlet</span></div>
+    </div>
+    <div className="ft-tabs">
+      <button className={mode === "role" ? "active" : ""} onClick={() => setMode("role")} data-testid="ft-mode-role">Per Role</button>
+      <button className={mode === "outlet" ? "active" : ""} onClick={() => setMode("outlet")} data-testid="ft-mode-outlet">Per Outlet</button>
+      <select value={target} onChange={(e) => setTarget(e.target.value)} data-testid="ft-target-select">
+        {mode === "role" ? ROLE_LIST.map(r => <option key={r}>{r}</option>)
+                        : (outlets || []).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+      </select>
+    </div>
+    <div className="ft-grid">
+      {FEATURE_LIST.map((f) => {
+        const on = scope[f.key] !== false;
+        return <label key={f.key} className={`ft-cell ${on ? "on" : "off"}`} data-testid={`ft-${f.key}`}>
+          <input type="checkbox" checked={on} onChange={() => toggle(f.key)} />
+          <b>{f.label}</b>
+          <span>{on ? "Aktif" : "Nonaktif"}</span>
+        </label>;
+      })}
+    </div>
+    <div className="modal-actions">
+      <button className="primary-btn" onClick={save} data-testid="save-feature-toggles"><Check size={14}/> Simpan Feature Toggles</button>
+    </div>
+  </section>;
+}
+
+// -------- Payment Settings: Bank Accounts + QRIS image --------
+function PaymentSettings({ notify }) {
+  const [banks, setBanks] = useState([]);
+  const [form, setForm] = useState({ bank_name: "", account_number: "", holder_name: "" });
+  const [qrisImg, setQrisImg] = useState("");
+  const load = () => {
+    axios.get(`${API}/settings/bank-accounts`).then(({ data }) => setBanks(data?.accounts || [])).catch(() => {});
+    axios.get(`${API}/settings/qris-image:outlet-sudirman`).then(({ data }) => setQrisImg(data?.image || "")).catch(() => {});
+  };
+  useEffect(() => { load(); }, []);
+  const add = async () => {
+    if (!form.bank_name || !form.account_number || !form.holder_name) return notify("Lengkapi data rekening");
+    try { await axios.post(`${API}/settings/bank-accounts`, form); setForm({ bank_name: "", account_number: "", holder_name: "" }); load(); notify("Rekening ditambahkan"); }
+    catch { notify("Gagal menambahkan rekening"); }
+  };
+  const remove = async (id) => { if (!window.confirm("Hapus rekening ini?")) return; await axios.delete(`${API}/settings/bank-accounts/${id}`); load(); notify("Rekening dihapus"); };
+  const handleQris = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = async () => { setQrisImg(r.result); await axios.post(`${API}/settings`, { key: "qris-image:outlet-sudirman", value: { image: r.result } }); notify("QRIS Toko diperbarui"); }; r.readAsDataURL(f); };
+  return <section className="panel product-form-v2">
+    <div className="form-heading"><div className="form-icon"><CreditCard size={18} /></div><div><h2>Pengaturan Pembayaran Toko</h2><span>Rekening Bank & QRIS Toko untuk Self-Order dan Kasir</span></div></div>
+    <div className="form-fields" style={{ gridTemplateColumns: "1.2fr 1.4fr 1.4fr auto" }}>
+      <label><span>Nama Bank</span><input value={form.bank_name} onChange={(e) => setForm({ ...form, bank_name: e.target.value })} placeholder="Contoh: BCA" data-testid="bank-name-input" /></label>
+      <label><span>Nomor Rekening</span><input value={form.account_number} onChange={(e) => setForm({ ...form, account_number: e.target.value })} placeholder="4820011..." data-testid="bank-account-input" /></label>
+      <label><span>Atas Nama</span><input value={form.holder_name} onChange={(e) => setForm({ ...form, holder_name: e.target.value })} placeholder="Nama Pemilik" data-testid="bank-holder-input" /></label>
+      <button className="primary-btn" onClick={add} data-testid="add-bank-button"><Plus size={14}/> Tambah</button>
+    </div>
+    <div className="data-table" style={{ marginTop: 12 }}>
+      <div className="table-row bank-row table-label"><span>Bank</span><span>Nomor</span><span>Atas Nama</span><span /></div>
+      {banks.map((b) => <div className="table-row bank-row" key={b.id} data-testid={`bank-row-${b.id}`}>
+        <span><b>{b.bank_name}</b></span><span className="mono">{b.account_number}</span><span>{b.holder_name}</span>
+        <button className="small-action" onClick={() => remove(b.id)} data-testid={`delete-bank-${b.id}`}><Trash2 size={12}/></button>
+      </div>)}
+      {banks.length === 0 && <div className="empty-vendor" style={{ padding: "20px 0" }}><CreditCard size={20} /><b>Belum ada rekening</b></div>}
+    </div>
+    <div className="brand-row" style={{ marginTop: 16 }}>
+      <div className="brand-preview" data-testid="qris-preview">
+        {qrisImg ? <img src={qrisImg} alt="QRIS Toko" /> : <QrCode size={44} color="#f97316" />}
+      </div>
+      <div>
+        <label className="upload-btn" data-testid="upload-qris-label"><Upload size={14} /> Upload QRIS Toko<input type="file" accept="image/*" onChange={handleQris} style={{ display: "none" }} data-testid="qris-image-input" /></label>
+      </div>
+    </div>
+  </section>;
+}
+
+// -------- PIN Generator (rolling 15 min) --------
+function PinGenerator({ notify }) {
+  const [pin, setPin] = useState("");
+  const [expires, setExpires] = useState("");
+  const [remaining, setRemaining] = useState(0);
+  useEffect(() => { const t = setInterval(() => {
+    if (!expires) return;
+    const diff = Math.max(0, Math.floor((new Date(expires).getTime() - Date.now()) / 1000));
+    setRemaining(diff);
+    if (diff <= 0) setPin("");
+  }, 1000); return () => clearInterval(t); }, [expires]);
+  const generate = async () => {
+    try { const { data } = await axios.post(`${API}/admin/pin/generate`); setPin(data.pin); setExpires(data.expires_at); notify("Kode otorisasi baru dibuat, berlaku 15 menit"); }
+    catch { notify("Gagal generate PIN"); }
+  };
+  return <section className="panel product-form-v2">
+    <div className="form-heading"><div className="form-icon"><Shield size={18} /></div><div><h2>Kode Otorisasi Kasir (15 menit)</h2><span>Untuk approve pembatalan / edit transaksi</span></div></div>
+    <div className="pin-display" data-testid="pin-display">
+      {pin ? <>
+        <code className="pin-code" data-testid="pin-code">{pin}</code>
+        <div className="pin-meta">
+          <span>Berlaku {Math.floor(remaining / 60)}m {String(remaining % 60).padStart(2, "0")}s</span>
+          <button className="outline-btn" onClick={generate} data-testid="regenerate-pin-button"><RefreshCw size={12}/> Generate ulang</button>
+        </div>
+      </> : <>
+        <div className="hint">Belum ada kode aktif</div>
+        <button className="primary-btn" onClick={generate} data-testid="generate-pin-button"><Shield size={14}/> Generate PIN</button>
+      </>}
+    </div>
+  </section>;
+}
 function UserManagement({ notify }) {
   const [users, setUsers] = useState([]);
+  const [outlets, setOutlets] = useState([]);
   const [reveal, setReveal] = useState({});
   const [form, setForm] = useState({ email: "", username: "", password: "", role: "Kasir", name: "", outlet_id: "outlet-sudirman", active: true });
   const [showReset, setShowReset] = useState(null);
   const [newPass, setNewPass] = useState("");
   const load = () => axios.get(`${API}/admin/users`).then(({ data }) => setUsers(data)).catch(() => {});
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {}); }, []);
   const save = async () => {
     if (!form.email || !form.password || !form.name) return notify("Email, password, nama wajib");
+    if (!form.outlet_id) return notify("Outlet tugas wajib dipilih");
     try { await axios.post(`${API}/admin/users`, form); setForm({ ...form, email: "", username: "", password: "", name: "" }); load(); notify("User berhasil dibuat"); }
     catch (e) { notify(e.response?.data?.detail || "Gagal menambah user"); }
   };
@@ -1026,12 +1457,13 @@ function UserManagement({ notify }) {
       action={<div className="live-pill"><i /> {users.length} akun aktif</div>} />
     <div className="panel product-form-v2">
       <div className="form-heading"><div className="form-icon"><Shield size={18} /></div><div><h2>Tambah user baru</h2><span>Password akan disimpan agar Super Admin dapat memulihkannya</span></div></div>
-      <div className="form-fields" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr auto" }}>
+      <div className="form-fields" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr auto" }}>
         <label><span>Nama</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="user-name-input" /></label>
         <label><span>Username</span><input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="mis. kasir2" data-testid="user-username-input" /></label>
         <label><span>Email</span><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} type="email" data-testid="user-email-input" /></label>
         <label><span>Password</span><input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-testid="user-password-input" /></label>
         <label><span>Role</span><select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} data-testid="user-role-select">{["Super Admin", "Admin", "Vendor", "Kasir"].map((r) => <option key={r}>{r}</option>)}</select></label>
+        <label><span>Outlet <em style={{ color: "#ef4444" }}>*</em></span><select value={form.outlet_id} onChange={(e) => setForm({ ...form, outlet_id: e.target.value })} data-testid="user-outlet-select">{outlets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
         <button className="primary-btn" onClick={save} data-testid="save-user-button"><Plus size={14} /> Simpan</button>
       </div>
     </div>
@@ -1238,32 +1670,69 @@ function CashierMonitor({ notify, onView }) {
 function CustomerSelfOrder() {
   const params = new URLSearchParams(window.location.search);
   const tableParam = params.get("table") || "01";
+  const outletId = params.get("outlet") || "outlet-sudirman";
   const [products, setProducts] = useState([]);
   const [cart, setCart] = useState([]);
-  const [step, setStep] = useState("menu"); // menu | pay | done
+  const [step, setStep] = useState("menu"); // menu | pay | done | closed
   const [payMethod, setPayMethod] = useState("QRIS");
   const [proof, setProof] = useState("");
-  const [qrisCode, setQrisCode] = useState("");
+  const [qrisImg, setQrisImg] = useState("");
+  const [banks, setBanks] = useState([]);
+  const [customerName, setCustomerName] = useState("");
+  const [orderId, setOrderId] = useState("");
+  const [status, setStatus] = useState("Pesanan Diterima");
+  const [shopOpen, setShopOpen] = useState(true);
+  const [shopMsg, setShopMsg] = useState("");
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
   useEffect(() => {
-    axios.get(`${API}/products`).then(({ data }) => setProducts(data)).catch(() => {});
-    axios.get(`${API}/settings/qris:outlet-sudirman`).then(({ data }) => setQrisCode(data?.qris_code || "")).catch(() => {});
-  }, []);
+    axios.get(`${API}/outlets/${outletId}/shift-status`).then(({ data }) => {
+      setShopOpen(!!data.open);
+      if (!data.open) setShopMsg("Mohon Maaf, Toko Sedang Tutup / Belum Menerima Pesanan Online");
+    }).catch(() => {});
+    axios.get(`${API}/products?outlet_id=${outletId}`).then(({ data }) => setProducts(data)).catch(() => {});
+    axios.get(`${API}/settings/qris-image:${outletId}`).then(({ data }) => setQrisImg(data?.image || "")).catch(() => {});
+    axios.get(`${API}/settings/bank-accounts?outlet_id=${outletId}`).then(({ data }) => setBanks(data?.accounts || [])).catch(() => {});
+  }, [outletId]);
+  useEffect(() => {
+    if (step !== "done" || !orderId) return;
+    const t = setInterval(async () => {
+      try { const { data } = await axios.get(`${API}/self-order/${orderId}/status`); setStatus(data.status); } catch {}
+    }, 4000);
+    return () => clearInterval(t);
+  }, [step, orderId]);
   const add = (p) => setCart((cur) => cur.find((i) => i.id === p.id) ? cur.map((i) => i.id === p.id ? { ...i, qty: i.qty + 1 } : i) : [...cur, { ...p, qty: 1 }]);
   const dec = (id) => setCart((cur) => cur.map((i) => i.id === id ? { ...i, qty: i.qty - 1 } : i).filter((i) => i.qty > 0));
   const handleFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setProof(r.result); r.readAsDataURL(f); };
   const sendOrder = async () => {
+    if (!customerName.trim()) { alert("Nama pelanggan wajib diisi"); return; }
     try {
-      await axios.post(`${API}/self-order`, {
+      const { data } = await axios.post(`${API}/self-order`, {
         table: `Meja ${tableParam}`,
+        outlet_id: outletId,
+        customer_name: customerName.trim(),
         lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id })),
         total, notes: "Self-service QR",
         payment_method: payMethod, payment_proof: proof,
       });
+      setOrderId(data.id);
+      setStatus(data.status || "Pesanan Diterima");
       setStep("done");
-    } catch { alert("Gagal mengirim pesanan"); }
+    } catch (e) {
+      if (e.response?.status === 423) setStep("closed");
+      else alert(e.response?.data?.detail || "Gagal mengirim pesanan");
+    }
   };
-  const qrPayload = qrisCode || `MJDKUPI|AMOUNT:${total}|TABLE:${tableParam}`;
+  if (!shopOpen) return <div className="customer-app" data-testid="customer-self-order">
+    <header className="customer-topbar"><div className="brand-mark"><Coffee size={18}/></div><div><strong>MJD Kupi</strong><span>Meja {tableParam}</span></div></header>
+    <div className="customer-done" data-testid="customer-closed">
+      <div className="brand-mark big" style={{ background: "#ef4444" }}><StopCircle size={30} /></div>
+      <h2>Toko Sedang Tutup</h2>
+      <p>{shopMsg}</p>
+      <span>Silakan datang kembali saat kasir sudah membuka shift.</span>
+    </div>
+  </div>;
+  const trackerSteps = ["Pesanan Diterima", "Diproses", "Siap diambil", "Selesai"];
+  const trackerIdx = trackerSteps.indexOf(status);
   return <div className="customer-app" data-testid="customer-self-order">
     <header className="customer-topbar">
       <div className="brand-mark"><Coffee size={18}/></div>
@@ -1283,18 +1752,23 @@ function CustomerSelfOrder() {
     </>}
     {step === "pay" && <div className="customer-pay">
       <h2>Konfirmasi & bayar</h2>
+      <label className="customer-label">Nama Pelanggan <em style={{ color: "#ef4444" }}>*</em></label>
+      <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Nama Anda" data-testid="customer-name-input" className="customer-input" />
       <div className="customer-lines">{cart.map((i) => <div key={i.id} className="customer-line">
         <div><b>{i.name}</b><span>{money(i.price)}</span></div>
         <div className="qty"><button onClick={() => dec(i.id)}>−</button><strong>{i.qty}</strong><button onClick={() => add(i)}>+</button></div>
       </div>)}</div>
       <div className="customer-total"><span>Total</span><strong>{money(total)}</strong></div>
       <div className="pay-tabs">
-        {[["QRIS", QrCode], ["Transfer", CreditCard], ["Cash", DollarSign]].map(([m, Icon]) => (
-          <button key={m} className={payMethod === m ? "active" : ""} onClick={() => setPayMethod(m)} data-testid={`customer-method-${m.toLowerCase()}`}><Icon size={16} />{m}</button>
+        {[["Tunai", DollarSign], ["QRIS Toko", QrCode], ["Transfer Bank", CreditCard]].map(([m, Icon]) => (
+          <button key={m} className={payMethod === m ? "active" : ""} onClick={() => setPayMethod(m)} data-testid={`customer-method-${m.toLowerCase().replaceAll(" ", "-")}`}><Icon size={16} />{m}</button>
         ))}
       </div>
-      {payMethod === "QRIS" && <div className="qris-real"><QRCodeSVG value={qrPayload} size={200} level="M" includeMargin={true} /></div>}
-      {payMethod !== "Cash" && <>
+      {payMethod === "QRIS Toko" && <div className="qris-real" data-testid="customer-qris-image">{qrisImg ? <img src={qrisImg} alt="QRIS Toko" style={{ width: 220, height: 220, objectFit: "contain" }} /> : <QRCodeSVG value={`MJDKUPI|OUTLET:${outletId}|AMOUNT:${total}`} size={200} level="M" includeMargin={true} />}</div>}
+      {payMethod === "Transfer Bank" && <div className="customer-banks" data-testid="customer-banks">
+        {banks.length ? banks.map((b) => <div className="bank-line" key={b.id}><b>{b.bank_name}</b><span className="mono">{b.account_number}</span><small>a.n. {b.holder_name}</small></div>) : <div className="hint">Belum ada rekening bank terdaftar</div>}
+      </div>}
+      {payMethod !== "Tunai" && <>
         <label className="customer-label">Upload bukti pembayaran</label>
         <input type="file" accept="image/*" onChange={handleFile} data-testid="customer-proof-input" />
         {proof && <div className="proof-thumb"><img src={proof} alt="bukti" /><Check size={16} color="#059669"/></div>}
@@ -1305,12 +1779,70 @@ function CustomerSelfOrder() {
     {step === "done" && <div className="customer-done" data-testid="customer-done">
       <div className="brand-mark big"><Check size={30}/></div>
       <h2>Pesanan terkirim!</h2>
-      <p>Meja {tableParam} · {money(total)}</p>
-      <span>Kasir akan segera memproses pesanan Anda. Terima kasih!</span>
+      <p>{customerName} · Meja {tableParam} · {money(total)}</p>
+      <div className="tracker" data-testid="order-tracker">
+        {["Pesanan Diterima", "Sedang Dibuat", "Siap Diambil", "Selesai"].map((label, idx) => {
+          const done = trackerIdx >= idx;
+          return <div key={label} className={`tracker-step ${done ? "done" : ""}`}>
+            <i>{done ? <Check size={12}/> : idx + 1}</i>
+            <span>{label}</span>
+          </div>;
+        })}
+      </div>
+      <span>Status live: <b data-testid="live-status">{status}</b></span>
     </div>}
   </div>;
 }
 
+
+// -------- History Kasir + Void with PIN --------
+function HistoryModal({ onClose, notify }) {
+  const [sales, setSales] = useState([]);
+  const [voiding, setVoiding] = useState(null);
+  const [pin, setPin] = useState("");
+  const [reason, setReason] = useState("");
+  const load = () => axios.get(`${API}/pos/history`).then(({ data }) => setSales(data)).catch(() => setSales([]));
+  useEffect(() => { load(); }, []);
+  const submitVoid = async () => {
+    if (!pin || pin.length < 6) return notify("Masukkan kode 6 huruf dari admin");
+    try { await axios.post(`${API}/sales/${voiding.id}/void`, { pin, reason }); setVoiding(null); setPin(""); setReason(""); load(); notify("Transaksi dibatalkan"); }
+    catch (e) { notify(e.response?.data?.detail || "Gagal membatalkan"); }
+  };
+  return <div className="modal-backdrop">
+    <div className="online-modal" data-testid="history-modal">
+      <button className="modal-close" onClick={onClose}><X size={18} /></button>
+      <div className="pay-head"><h2>History Transaksi Shift Aktif</h2><span>{sales.length} transaksi · hanya shift Anda</span></div>
+      <div className="online-list">
+        {sales.length === 0 && <div className="empty-cart"><Receipt size={30} /><b>Belum ada transaksi</b><span>History akan muncul begitu ada penjualan</span></div>}
+        {sales.map((s) => <div className={`online-item ${s.status === "voided" ? "voided" : ""}`} key={s.id} data-testid={`history-item-${s.id}`}>
+          <div className="online-item-head">
+            <div><b>#{String(s.id).slice(-6).toUpperCase()}</b><span className="mono">{new Date(s.created_at).toLocaleTimeString("id-ID")}</span></div>
+            <strong>{money(s.total)}</strong>
+          </div>
+          <ul className="online-lines">{(s.lines || []).slice(0, 3).map((ln, i) => <li key={i}><b>{ln.quantity}×</b> {ln.name}</li>)}{(s.lines || []).length > 3 && <li>+{s.lines.length - 3} item</li>}</ul>
+          <div className="history-foot">
+            <span className={`status-badge ${s.status}`}>{s.status === "voided" ? "DIBATALKAN" : s.payment_method}</span>
+            {s.status !== "voided" && <button className="small-action danger" onClick={() => setVoiding(s)} data-testid={`void-${s.id}`}><X size={11}/> Batalkan</button>}
+          </div>
+        </div>)}
+      </div>
+      {voiding && <div className="modal-backdrop" style={{ zIndex: 60 }}>
+        <div className="pay-modal" data-testid="void-pin-modal">
+          <button className="modal-close" onClick={() => setVoiding(null)}><X size={18} /></button>
+          <div className="pay-head"><h2>Batalkan Transaksi</h2><span>#{String(voiding.id).slice(-6).toUpperCase()} · {money(voiding.total)}</span></div>
+          <div className="pay-body">
+            <div className="hint">Minta Admin generate PIN 6 huruf (berlaku 15 menit) dari menu Pengaturan.</div>
+            <label>Kode Otorisasi (6 huruf)</label>
+            <input value={pin} onChange={(e) => setPin(e.target.value.toUpperCase())} maxLength={6} placeholder="X7K9LP" style={{ letterSpacing: 6, fontFamily: "monospace", fontSize: 18 }} data-testid="void-pin-input" />
+            <label>Alasan (opsional)</label>
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Alasan pembatalan" data-testid="void-reason-input" />
+          </div>
+          <button className="primary-btn full" onClick={submitVoid} data-testid="void-submit-button"><Check size={14}/> Konfirmasi pembatalan</button>
+        </div>
+      </div>}
+    </div>
+  </div>;
+}
 
 // -------- Login --------
 function Login({ onLogin }) {

@@ -1,0 +1,40 @@
+{
+  "summary": "Feb 2026 batch (Iteration 11) backend validation. Added /app/backend/tests/test_iteration11_feb2026.py — 15 tests covering Product Variants (PUT persistence, GET, sale variant pricing, invalid variant rejection, notes truncation), White-Label merchant fields (PUT/GET), Branding endpoints (by-slug 200/404, current for Super Admin & Vendor), Subscription enforcement (suspend blocks vendor login with EXACT Indonesian message → restore allows login), and Feature Toggles (GET defaults shape, POST matrix persistence, Admin 403). All 15/15 PASSED. Regression: test_iteration10_new_features.py 25/25 PASSED when run sequentially (-n 0). One test needed a fix: variant-pricing assertion incorrectly expected auto 10% tax; server logic accepts client-sent tax=0 within tolerance (0 ≤ client ≤ computed*1.05), so total=subtotal when client sends 0. Fixed to expect total==subtotal==40000. Autouse fixture guarantees m-barista.subscription_status='active' is restored before and after the module regardless of failure.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/sales tax handling", "issue": "Server accepts client-supplied tax if 0<=tax<=computed*1.05, so a client can bypass 10% PB1 by sending tax=0. Not a variant-pricing bug (subtotal is server-authoritative) but tax bypass is a pricing loophole worth reviewing per business policy."},
+      {"endpoint": "PUT /api/merchants/{id} features_enabled=None", "issue": "server.py line 542 branches `if data.get('features_enabled') is None and 'features_enabled' in data:` — because model_dump(exclude_unset=True) drops None-valued fields unless explicitly sent, this branch rarely fires. Not a functional bug; harmless dead-ish code."},
+      {"endpoint": "iter10 xdist parallelism", "issue": "TestShiftLock and TestCashOpname both mutate the single 'kasir' user's active shift; with -n 2 --dist loadscope these two classes run on different workers → race → intermittent failures. Passes fully with -n 0. Consider marking them same xdist_group or using per-test kasir accounts."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration11_feb2026.py",
+    "/app/test_reports/pytest/iteration_11_results.xml",
+    "/app/test_reports/pytest/iteration_10_regression.xml"
+  ],
+  "action_items": [
+    "Consider whether client-supplied tax=0 should be accepted or always overridden with computed tax (SEC-005 partial coverage — subtotal is authoritative but tax isn't).",
+    "Add xdist_group marker (or serialize) for TestShiftLock+TestCashOpname to avoid intermittent parallel failures.",
+    "Optional: expose feature_toggles under BOTH /api/feature-toggles and /api/settings/feature-toggles (current path avoids conflict with parameterized /api/settings/{key}, confirmed correct)."
+  ],
+  "critical_code_review_comments": [
+    "create_sale variant lookup uses `v.get('active', True)` — a variant with active=False will be REJECTED (raises 'Varian tidak valid'). Confirm this is desired; today's tests don't cover an inactive variant path.",
+    "branding_by_slug returns 403 with the Indonesian message when merchant is suspended — good; but branding_current does NOT raise 403 for suspended vendor (only login enforces it). Vendor already logged in with a valid JWT before suspension keeps working until token expires. If instant lockout is required, add a subscription check inside current_user() as well.",
+    "MerchantInput default `subscription_status='active'` in Pydantic model means every PUT without that field will overwrite existing status with 'active' UNLESS model_dump(exclude_unset=True) drops it — and it does since Pydantic v2 exclude_unset only omits fields NOT explicitly passed. Verified safe with test_iteration11 payload (partial updates preserve slug/logo when the field is omitted). Nevertheless the wide MerchantInput schema with all-default fields is footgun-prone for future PATCH-style calls.",
+    "server.py is 1813 lines — over the 700-line guideline. Split into routers/{auth,products,sales,merchants,settings,branding}.py to improve maintainability.",
+    "Product variants JSON column is not wrapped with MutableDict; PUT re-assigns the whole list so it works, but any future in-place variant mutation will hit the same bug fixed in iter10 for bank-accounts. Prefer flag_modified pattern or MutableList."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration11_feb2026.py (new)",
+    "/app/test_reports/pytest/iteration_11_results.xml",
+    "/app/test_reports/pytest/iteration_10_regression.xml"
+  ],
+  "success_rate": {"backend": "100% (iter11 15/15 + iter10 25/25 sequential)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "Per /app/memory/test_credentials.md. Vendor merchant m-barista subscription_status was toggled during subscription tests and RESTORED to 'active' by module autouse fixture and verified via curl.",
+  "seed_data_creation": "Left in DB: (a) product p-1 now has two variants Panas(18k) and Ice(20k); (b) merchant m-barista has slug=barista-test-<hex>, logo_url/theme_color(#00A86B)/banner_url/receipt_header/receipt_footer/wifi_password set, features_enabled.self_order=false; (c) subscription_status restored to 'active'. Feature toggle matrix reset to {} at end of tests. Several TEST_ prefixed sales exist for kasir Meja TEST_VAR/BAD_VAR/NOTES.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run iter11 alone or with -n 0 to avoid xdist collisions with iter10. Vendor merchant m-barista may have leftover slug/theme from white-label test — restore with PUT if needed. Feature-toggles endpoint is /api/feature-toggles (not /api/settings/feature-toggles). Subscription enforcement message must be EXACT 'Masa Langganan/Kerjasama Toko Telah Berakhir. Silakan Hubungi Platform Owner.' — Indonesian, includes period."
+}

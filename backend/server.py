@@ -44,6 +44,25 @@ class MerchantInput(BaseModel):
     phone: str = ""
     color: str = "#ffedd5"
     active: bool = True
+    # White-Label branding
+    slug: Optional[str] = None
+    logo_url: str = ""
+    theme_color: str = "#f97316"
+    banner_url: str = ""
+    receipt_header: str = ""
+    receipt_footer: str = ""
+    wifi_password: str = ""
+    subscription_status: str = "active"
+    subscription_expires_at: Optional[str] = None
+    features_enabled: Optional[dict] = None
+
+
+class ProductVariant(BaseModel):
+    id: Optional[str] = None
+    name: str
+    price: float = 0
+    cost: float = 0
+    active: bool = True
 
 
 class ProductInput(BaseModel):
@@ -52,12 +71,14 @@ class ProductInput(BaseModel):
     category: str = "Lain-lain"
     vendor: str = "MJD Kupi"
     merchant_id: Optional[str] = None
+    outlet_id: str = "outlet-sudirman"
     price: float = 0
     cost: float = 0
     stock: int = 0
     color: str = "#ffedd5"
     image_url: str = ""
     modifiers: List[Any] = []
+    variants: List[ProductVariant] = []
 
 
 class StockAdjustment(BaseModel):
@@ -83,6 +104,9 @@ class SaleLine(BaseModel):
     price: float
     vendor: str = "MJD Kupi"
     merchant_id: Optional[str] = None
+    variant_id: Optional[str] = None
+    variant_name: str = ""
+    notes: str = ""
 
 
 class SaleInput(BaseModel):
@@ -105,6 +129,24 @@ class SelfOrderInput(BaseModel):
     notes: str = ""
     payment_method: str = ""
     payment_proof: str = ""
+    customer_name: str = ""
+    outlet_id: str = "outlet-sudirman"
+
+
+class VoidSaleInput(BaseModel):
+    pin: str
+    reason: str = ""
+
+
+class BankAccountInput(BaseModel):
+    bank_name: str
+    account_number: str
+    holder_name: str
+
+
+class PinGenerateResponse(BaseModel):
+    pin: str
+    expires_at: str
 
 
 class OutletInput(BaseModel):
@@ -208,6 +250,20 @@ def to_dict(row, exclude=("password_hash",)) -> dict:
 
 
 # -----------------------------------------------------------------------------
+# Outlet isolation helper
+# -----------------------------------------------------------------------------
+
+def outlet_scope(user: M.User, requested_outlet: Optional[str] = None) -> Optional[str]:
+    """Return the outlet_id a user is allowed to query.
+    - Super Admin/Admin: may pass ?outlet_id=xxx to filter, or None for all.
+    - Kasir/Vendor: forced to their own outlet_id (ignore param).
+    """
+    if user.role in ("Super Admin", "Admin"):
+        return requested_outlet or None
+    return user.outlet_id or "outlet-sudirman"
+
+
+# -----------------------------------------------------------------------------
 # Auth routes
 # -----------------------------------------------------------------------------
 
@@ -227,6 +283,12 @@ async def login(payload: LoginInput, response: Response, db: AsyncSession = Depe
         raise HTTPException(status_code=401, detail="Email/username atau password salah")
     if user.active is False:
         raise HTTPException(status_code=403, detail="Akun dinonaktifkan")
+    # White-Label: enforce merchant subscription status
+    if user.merchant_id and user.role != "Super Admin":
+        mres = await db.execute(select(M.Merchant).where(M.Merchant.id == user.merchant_id))
+        merchant = mres.scalar_one_or_none()
+        if merchant and merchant.subscription_status == "suspended":
+            raise HTTPException(status_code=403, detail="Masa Langganan/Kerjasama Toko Telah Berakhir. Silakan Hubungi Platform Owner.")
     access = token_for(user)
     refresh = token_for(user, "refresh")
     # Same-origin deployment (frontend + /api served via ingress) → SameSite=Lax mitigates CSRF.
@@ -443,6 +505,15 @@ async def create_merchant(
         phone=payload.phone,
         color=payload.color,
         active=payload.active,
+        slug=payload.slug,
+        logo_url=payload.logo_url,
+        theme_color=payload.theme_color,
+        banner_url=payload.banner_url,
+        receipt_header=payload.receipt_header,
+        receipt_footer=payload.receipt_footer,
+        wifi_password=payload.wifi_password,
+        subscription_status=payload.subscription_status,
+        features_enabled=payload.features_enabled or {},
     )
     db.add(merchant)
     await db.commit()
@@ -461,7 +532,16 @@ async def update_merchant(
     merchant = result.scalar_one_or_none()
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant tidak ditemukan")
-    for field, value in payload.model_dump(exclude_unset=True, exclude={"id"}).items():
+    data = payload.model_dump(exclude_unset=True, exclude={"id"})
+    # Convert subscription_expires_at ISO string → datetime
+    if "subscription_expires_at" in data and data["subscription_expires_at"]:
+        try:
+            data["subscription_expires_at"] = datetime.fromisoformat(data["subscription_expires_at"].replace("Z", "+00:00"))
+        except Exception:
+            data["subscription_expires_at"] = None
+    if data.get("features_enabled") is None and "features_enabled" in data:
+        data["features_enabled"] = {}
+    for field, value in data.items():
         setattr(merchant, field, value)
     await db.commit()
     await db.refresh(merchant)
@@ -495,8 +575,29 @@ async def delete_merchant(
 # -----------------------------------------------------------------------------
 
 @api_router.get("/products")
-async def list_products(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(M.Product).order_by(M.Product.name))
+async def list_products(
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    # Public (customer self-order): must specify outlet_id
+    # Authed: apply role-based outlet scope
+    user = None
+    try:
+        user = await current_user(request, db) if request else None
+    except HTTPException:
+        user = None
+    stmt = select(M.Product).order_by(M.Product.name)
+    if user:
+        scope = outlet_scope(user, outlet_id)
+        if scope:
+            stmt = stmt.where(M.Product.outlet_id == scope)
+    else:
+        # Anonymous: must specify outlet to prevent full catalog leak
+        if not outlet_id:
+            raise HTTPException(status_code=400, detail="outlet_id wajib untuk akses publik")
+        stmt = stmt.where(M.Product.outlet_id == outlet_id)
+    result = await db.execute(stmt)
     return [to_dict(p) for p in result.scalars().all()]
 
 
@@ -506,18 +607,24 @@ async def create_product(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
+    # Admin can only create products for their own outlet; Super Admin unrestricted
+    outlet_id = payload.outlet_id or user.outlet_id or "outlet-sudirman"
+    if user.role == "Admin" and outlet_id != (user.outlet_id or "outlet-sudirman"):
+        raise HTTPException(status_code=403, detail="Admin hanya boleh produk outletnya sendiri")
     product = M.Product(
         id=payload.id or str(uuid.uuid4()),
         name=payload.name,
         category=payload.category,
         vendor=payload.vendor,
         merchant_id=payload.merchant_id,
+        outlet_id=outlet_id,
         price=payload.price,
         cost=payload.cost,
         stock=payload.stock,
         color=payload.color,
         image_url=payload.image_url,
         modifiers=payload.modifiers,
+        variants=[{**v.model_dump(), "id": v.id or str(uuid.uuid4())} for v in (payload.variants or [])],
     )
     db.add(product)
     await db.commit()
@@ -536,7 +643,11 @@ async def update_product(
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Produk tidak ditemukan")
-    for field, value in payload.model_dump(exclude_unset=True, exclude={"id"}).items():
+    data = payload.model_dump(exclude_unset=True, exclude={"id"})
+    # Normalize variants ids
+    if "variants" in data and data["variants"] is not None:
+        data["variants"] = [{**v, "id": v.get("id") or str(uuid.uuid4())} for v in data["variants"]]
+    for field, value in data.items():
         setattr(product, field, value)
     await db.commit()
     await db.refresh(product)
@@ -569,16 +680,22 @@ async def adjust_stock(
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Produk tidak ditemukan")
+    # Outlet isolation: non-super admin can only adjust products of their outlet
+    if user.role != "Super Admin" and product.outlet_id and product.outlet_id != user.outlet_id:
+        raise HTTPException(status_code=403, detail="Produk bukan milik outlet Anda")
     if payload.kind == "opname":
         product.stock = max(0, payload.quantity)
     else:
         product.stock = max(0, int(product.stock or 0) + payload.quantity)
     log = M.StockLog(
         product_id=product_id,
+        outlet_id=product.outlet_id or user.outlet_id or "outlet-sudirman",
         quantity=payload.quantity,
         reason=payload.reason,
         kind=payload.kind,
         note=payload.note,
+        user_id=user.id,
+        user_name=user.name,
     )
     db.add(log)
     await db.commit()
@@ -588,10 +705,15 @@ async def adjust_stock(
 
 @api_router.get("/stock-logs")
 async def stock_logs(
+    outlet_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Admin", "Super Admin")),
 ):
-    result = await db.execute(select(M.StockLog).order_by(M.StockLog.created_at.desc()).limit(500))
+    scope = outlet_scope(user, outlet_id)
+    stmt = select(M.StockLog).order_by(M.StockLog.created_at.desc()).limit(500)
+    if scope:
+        stmt = stmt.where(M.StockLog.outlet_id == scope)
+    result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
 
 
@@ -600,13 +722,20 @@ async def stock_logs(
 # -----------------------------------------------------------------------------
 
 @api_router.get("/expenses")
-async def list_expenses(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
+async def list_expenses(
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(current_user),
+):
     stmt = select(M.Expense).order_by(M.Expense.date.desc())
-    # SEC-004: Kasir only sees own expenses; others see all (business ops view)
     if user.role == "Kasir":
         stmt = stmt.where(M.Expense.user_id == user.id)
     elif user.role == "Vendor":
         raise HTTPException(status_code=403, detail="Vendor tidak berhak melihat pengeluaran")
+    else:
+        scope = outlet_scope(user, outlet_id)
+        if scope:
+            stmt = stmt.where(M.Expense.outlet_id == scope)
     result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
 
@@ -647,7 +776,7 @@ async def create_expense(
 # -----------------------------------------------------------------------------
 
 async def create_kitchen_tickets(
-    db: AsyncSession, source_id: str, source_type: str, table_no: str, lines: List[dict]
+    db: AsyncSession, source_id: str, source_type: str, table_no: str, lines: List[dict], outlet_id: str = "outlet-sudirman",
 ):
     """Split order lines by merchant / vendor and create kitchen tickets."""
     buckets: dict[str, dict] = {}
@@ -663,6 +792,7 @@ async def create_kitchen_tickets(
             source_id=source_id,
             source_type=source_type,
             table_no=table_no,
+            outlet_id=outlet_id,
             merchant_id=bucket["merchant_id"],
             merchant_name=bucket["merchant_name"],
             lines=bucket["lines"],
@@ -701,7 +831,16 @@ async def create_sale(
         if not product:
             raise HTTPException(status_code=400, detail=f"Produk {line.product_id} tidak ditemukan")
         qty = max(1, int(line.quantity or 0))
+        # If variant selected, use variant price; else use product price
+        variant_name = ""
+        variant_id = line.variant_id or None
         price = float(product.price)
+        if variant_id and product.variants:
+            variant = next((v for v in product.variants if v.get("id") == variant_id and v.get("active", True)), None)
+            if not variant:
+                raise HTTPException(status_code=400, detail=f"Varian tidak valid untuk {product.name}")
+            price = float(variant.get("price", product.price))
+            variant_name = variant.get("name", "")
         subtotal += price * qty
         verified_lines.append({
             "product_id": product.id,
@@ -710,6 +849,9 @@ async def create_sale(
             "price": price,
             "vendor": product.vendor,
             "merchant_id": product.merchant_id,
+            "variant_id": variant_id,
+            "variant_name": variant_name,
+            "notes": (line.notes or "")[:200],
         })
     # Honor tax the client sent only if it is <= 10% of computed subtotal (guard against tax=0 games / inflation)
     computed_tax = round(subtotal * 0.10)
@@ -741,12 +883,16 @@ async def create_sale(
     await db.commit()
     await db.refresh(sale)
     # Kitchen tickets split per merchant
-    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, verified_lines)
+    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, verified_lines, outlet_id=sale.outlet_id)
     return to_dict(sale)
 
 
 @api_router.get("/sales")
-async def list_sales(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
+async def list_sales(
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(current_user),
+):
     stmt = select(M.Sale).order_by(M.Sale.created_at.desc()).limit(500)
     # Isolation: Kasir hanya melihat transaksi shift aktifnya sendiri
     if user.role == "Kasir":
@@ -758,6 +904,10 @@ async def list_sales(db: AsyncSession = Depends(get_db), user: M.User = Depends(
             stmt = select(M.Sale).where(M.Sale.shift_id == shift.id).order_by(M.Sale.created_at.desc())
         else:
             return []
+    else:
+        scope = outlet_scope(user, outlet_id)
+        if scope:
+            stmt = stmt.where(M.Sale.outlet_id == scope)
     result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
 
@@ -784,9 +934,19 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db), user: M.User = D
 
 @api_router.post("/self-order")
 async def create_self_order(payload: SelfOrderInput, db: AsyncSession = Depends(get_db)):
+    if not payload.customer_name:
+        raise HTTPException(status_code=400, detail="Nama pelanggan wajib diisi")
+    # Check if any cashier has an open shift at this outlet
+    active_shift = await db.execute(
+        select(M.Shift).where(M.Shift.status == "open", M.Shift.outlet_id == payload.outlet_id)
+    )
+    if not active_shift.scalar_one_or_none():
+        raise HTTPException(status_code=423, detail="Toko sedang tutup - belum ada kasir buka shift")
     order = M.SelfOrder(
         id=str(uuid.uuid4()),
         table_no=payload.table,
+        outlet_id=payload.outlet_id,
+        customer_name=payload.customer_name,
         total=payload.total,
         notes=payload.notes,
         lines=[ln.model_dump() for ln in payload.lines],
@@ -797,6 +957,33 @@ async def create_self_order(payload: SelfOrderInput, db: AsyncSession = Depends(
     await db.commit()
     await db.refresh(order)
     return to_dict(order)
+
+
+@api_router.get("/self-order/{order_id}/status")
+async def self_order_status(order_id: str, db: AsyncSession = Depends(get_db)):
+    """Public endpoint for customer to poll their order status."""
+    result = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
+    return {
+        "id": order.id,
+        "status": order.status,
+        "table_no": order.table_no,
+        "customer_name": order.customer_name,
+        "total": order.total,
+        "created_at": order.created_at.isoformat() if order.created_at else "",
+    }
+
+
+@api_router.get("/outlets/{outlet_id}/shift-status")
+async def outlet_shift_status(outlet_id: str, db: AsyncSession = Depends(get_db)):
+    """Public: is the store open (any kasir shift active) at this outlet?"""
+    r = await db.execute(
+        select(M.Shift).where(M.Shift.status == "open", M.Shift.outlet_id == outlet_id)
+    )
+    shift = r.scalar_one_or_none()
+    return {"outlet_id": outlet_id, "open": bool(shift), "cashier_name": shift.cashier_name if shift else ""}
 
 
 @api_router.post("/self-order/{order_id}/accept")
@@ -831,7 +1018,14 @@ async def accept_self_order(
         if not product:
             continue
         qty = max(1, int(line.get("quantity") or 0))
+        variant_id = line.get("variant_id")
+        variant_name = ""
         price = float(product.price)
+        if variant_id and product.variants:
+            variant = next((v for v in product.variants if v.get("id") == variant_id and v.get("active", True)), None)
+            if variant:
+                price = float(variant.get("price", product.price))
+                variant_name = variant.get("name", "")
         subtotal += price * qty
         verified_lines.append({
             "product_id": product.id,
@@ -840,6 +1034,9 @@ async def accept_self_order(
             "price": price,
             "vendor": product.vendor,
             "merchant_id": product.merchant_id,
+            "variant_id": variant_id,
+            "variant_name": variant_name,
+            "notes": (line.get("notes") or "")[:200],
         })
     sale = M.Sale(
         id=str(uuid.uuid4()),
@@ -863,7 +1060,7 @@ async def accept_self_order(
     order.status = "Diproses"
     await db.commit()
     await db.refresh(sale)
-    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, verified_lines)
+    await create_kitchen_tickets(db, sale.id, "sale", sale.table_no, verified_lines, outlet_id=sale.outlet_id)
     return to_dict(sale)
 
 
@@ -927,6 +1124,7 @@ async def vendor_settlement(
 
 @api_router.get("/kds/orders")
 async def kds_orders(
+    outlet_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Vendor", "Admin", "Super Admin", "Kasir")),
 ):
@@ -936,9 +1134,13 @@ async def kds_orders(
         .order_by(M.KitchenOrder.sla_start.asc())
         .limit(200)
     )
-    # SEC-003: Vendors only see their merchant's tickets
+    # Vendor bound to merchant
     if user.role == "Vendor" and user.merchant_id:
         stmt = stmt.where(M.KitchenOrder.merchant_id == user.merchant_id)
+    # Outlet isolation
+    scope = outlet_scope(user, outlet_id)
+    if scope:
+        stmt = stmt.where(M.KitchenOrder.outlet_id == scope)
     result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
 
@@ -1011,14 +1213,22 @@ async def close_shift(
     shift = result.scalar_one_or_none()
     if not shift:
         raise HTTPException(status_code=404, detail="Tidak ada shift aktif")
-    # Sum cash sales during the shift
-    cash_result = await db.execute(
+    # Cash sales during this shift
+    cash_r = await db.execute(
         select(func.coalesce(func.sum(M.Sale.total), 0)).where(
-            M.Sale.shift_id == shift.id, M.Sale.payment_method == "Cash"
+            M.Sale.shift_id == shift.id, M.Sale.payment_method == "Cash", M.Sale.status != "voided"
         )
     )
-    cash_sales = float(cash_result.scalar_one() or 0)
-    shift.expected_cash = shift.opening_cash + cash_sales
+    cash_sales = float(cash_r.scalar_one() or 0)
+    # Cash expenses recorded during this shift (kas keluar)
+    exp_r = await db.execute(
+        select(func.coalesce(func.sum(M.Expense.amount), 0)).where(
+            M.Expense.shift_id == shift.id, M.Expense.method == "Cash"
+        )
+    )
+    cash_expenses = float(exp_r.scalar_one() or 0)
+    # Kas Seharusnya = Modal Awal + Omset Tunai - Pengeluaran Tunai
+    shift.expected_cash = float(shift.opening_cash) + cash_sales - cash_expenses
     shift.closing_cash = payload.closing_cash
     shift.variance = payload.closing_cash - shift.expected_cash
     shift.note = payload.note or shift.note
@@ -1029,6 +1239,7 @@ async def close_shift(
     return {
         **to_dict(shift),
         "cash_sales": cash_sales,
+        "cash_expenses": cash_expenses,
     }
 
 
@@ -1116,17 +1327,173 @@ async def shift_report(
 
 @api_router.get("/pos/online-orders")
 async def pos_online_orders(
+    outlet_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
 ):
     """Antrean pesanan dari QR meja self-order yang belum di-approve kasir."""
-    result = await db.execute(
+    stmt = (
         select(M.SelfOrder)
-        .where(M.SelfOrder.status.in_(["Menunggu kasir", "Menunggu konfirmasi"]))
+        .where(M.SelfOrder.status.in_(["Pesanan Diterima", "Menunggu kasir", "Menunggu konfirmasi"]))
         .order_by(M.SelfOrder.created_at.desc())
         .limit(100)
     )
+    scope = outlet_scope(user, outlet_id)
+    if scope:
+        stmt = stmt.where(M.SelfOrder.outlet_id == scope)
+    result = await db.execute(stmt)
     return [to_dict(row) for row in result.scalars().all()]
+
+
+# -----------------------------------------------------------------------------
+# PIN authorization (dynamic 6-char code, valid 15 min) — TOTP-like
+# -----------------------------------------------------------------------------
+
+import secrets as _secrets
+
+@api_router.post("/admin/pin/generate", response_model=PinGenerateResponse)
+async def generate_pin(
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
+):
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    pin = "".join(_secrets.choice(alphabet) for _ in range(6))
+    expires = datetime.now(timezone.utc) + timedelta(minutes=15)
+    key = f"pin:{user.outlet_id or 'outlet-sudirman'}"
+    payload = {"pin": pin, "expires_at": expires.isoformat(), "generated_by": user.username or user.email}
+    r = await db.execute(select(M.Setting).where(M.Setting.key == key))
+    row = r.scalar_one_or_none()
+    if row:
+        row.value = payload; row.updated_at = datetime.now(timezone.utc)
+    else:
+        db.add(M.Setting(key=key, value=payload))
+    await db.commit()
+    logger.info(f"[audit] pin_generated by={user.username or user.email} outlet={user.outlet_id}")
+    return {"pin": pin, "expires_at": expires.isoformat()}
+
+
+async def _verify_pin(db: AsyncSession, outlet_id: str, pin: str) -> bool:
+    r = await db.execute(select(M.Setting).where(M.Setting.key == f"pin:{outlet_id}"))
+    row = r.scalar_one_or_none()
+    if not row or not row.value:
+        return False
+    data = row.value
+    if str(data.get("pin", "")).upper() != pin.upper():
+        return False
+    try:
+        exp = datetime.fromisoformat(data["expires_at"])
+        return datetime.now(timezone.utc) < exp
+    except Exception:
+        return False
+
+
+@api_router.post("/sales/{sale_id}/void")
+async def void_sale(
+    sale_id: str,
+    payload: VoidSaleInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
+):
+    result = await db.execute(select(M.Sale).where(M.Sale.id == sale_id))
+    sale = result.scalar_one_or_none()
+    if not sale:
+        raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
+    if sale.status == "voided":
+        raise HTTPException(status_code=400, detail="Transaksi sudah dibatalkan")
+    if user.role == "Kasir" and sale.cashier_id != user.id:
+        raise HTTPException(status_code=403, detail="Bukan transaksi Anda")
+    if not await _verify_pin(db, sale.outlet_id or user.outlet_id, payload.pin):
+        raise HTTPException(status_code=403, detail="Kode otorisasi salah atau kadaluarsa")
+    # Restore stock
+    for line in (sale.lines or []):
+        pr = await db.execute(select(M.Product).where(M.Product.id == line.get("product_id")))
+        p = pr.scalar_one_or_none()
+        if p:
+            p.stock = int(p.stock or 0) + int(line.get("quantity", 0))
+    sale.status = "voided"
+    sale.void_reason = payload.reason
+    sale.voided_at = datetime.now(timezone.utc)
+    await db.commit()
+    logger.info(f"[audit] sale_voided id={sale.id} by={user.username or user.email} reason={payload.reason}")
+    return to_dict(sale)
+
+
+@api_router.get("/pos/history")
+async def kasir_history(
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
+):
+    """History transaksi kasir untuk shift aktif."""
+    if user.role != "Kasir":
+        r = await db.execute(select(M.Sale).order_by(M.Sale.created_at.desc()).limit(100))
+        return [to_dict(s) for s in r.scalars().all()]
+    a = await db.execute(select(M.Shift).where(M.Shift.cashier_id == user.id, M.Shift.status == "open"))
+    shift = a.scalar_one_or_none()
+    if not shift:
+        return []
+    r = await db.execute(select(M.Sale).where(M.Sale.shift_id == shift.id).order_by(M.Sale.created_at.desc()))
+    return [to_dict(s) for s in r.scalars().all()]
+
+
+# -----------------------------------------------------------------------------
+# Bank accounts (per outlet)
+# -----------------------------------------------------------------------------
+
+@api_router.get("/settings/bank-accounts")
+async def get_bank_accounts(
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    outlet = outlet_id or "outlet-sudirman"
+    r = await db.execute(select(M.Setting).where(M.Setting.key == f"bank-accounts:{outlet}"))
+    row = r.scalar_one_or_none()
+    return row.value if row else {"accounts": []}
+
+
+from sqlalchemy.orm.attributes import flag_modified
+
+@api_router.post("/settings/bank-accounts")
+async def add_bank_account(
+    payload: BankAccountInput,
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
+):
+    outlet = outlet_id or user.outlet_id or "outlet-sudirman"
+    key = f"bank-accounts:{outlet}"
+    r = await db.execute(select(M.Setting).where(M.Setting.key == key))
+    row = r.scalar_one_or_none()
+    accounts = list(row.value.get("accounts", [])) if row and row.value else []
+    accounts.append({"id": str(uuid.uuid4()), **payload.model_dump()})
+    if row:
+        row.value = {"accounts": accounts}
+        row.updated_at = datetime.now(timezone.utc)
+        flag_modified(row, "value")
+    else:
+        db.add(M.Setting(key=key, value={"accounts": accounts}))
+    await db.commit()
+    return {"accounts": accounts}
+
+
+@api_router.delete("/settings/bank-accounts/{account_id}")
+async def delete_bank_account(
+    account_id: str,
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
+):
+    outlet = outlet_id or user.outlet_id or "outlet-sudirman"
+    key = f"bank-accounts:{outlet}"
+    r = await db.execute(select(M.Setting).where(M.Setting.key == key))
+    row = r.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Belum ada rekening")
+    accounts = [a for a in (row.value.get("accounts", []) or []) if a.get("id") != account_id]
+    row.value = {"accounts": accounts}
+    row.updated_at = datetime.now(timezone.utc)
+    flag_modified(row, "value")
+    await db.commit()
+    return {"accounts": accounts}
 
 
 # -----------------------------------------------------------------------------
@@ -1181,6 +1548,94 @@ async def save_qris(
 
 
 # -----------------------------------------------------------------------------
+# Feature Toggles (per role / per outlet) — Super Admin only
+# -----------------------------------------------------------------------------
+
+FEATURE_KEYS_DEFAULT = {
+    "pos": True, "self_order": True, "kds": True, "inventory": True,
+    "expenses": True, "reports": True, "vendor_center": True, "settings": True,
+    "users": True, "merchants": True, "products": True, "outlets": True,
+    "tables": True, "cashiers": True, "overview": True, "white_label": True,
+}
+
+
+class FeatureToggleInput(BaseModel):
+    # matrix: {"role:Kasir": {"pos": true, "kds": false}, "outlet:outlet-kemang": {"self_order": false}}
+    matrix: dict = {}
+
+
+@api_router.get("/feature-toggles")
+async def get_feature_toggles(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
+    result = await db.execute(select(M.Setting).where(M.Setting.key == "feature_toggles"))
+    row = result.scalar_one_or_none()
+    matrix = (row.value or {}).get("matrix", {}) if row else {}
+    return {"defaults": FEATURE_KEYS_DEFAULT, "matrix": matrix}
+
+
+@api_router.post("/feature-toggles")
+async def save_feature_toggles(
+    payload: FeatureToggleInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin")),
+):
+    result = await db.execute(select(M.Setting).where(M.Setting.key == "feature_toggles"))
+    row = result.scalar_one_or_none()
+    value = {"matrix": payload.matrix or {}}
+    if row:
+        row.value = value
+        row.updated_at = datetime.now(timezone.utc)
+    else:
+        db.add(M.Setting(key="feature_toggles", value=value))
+    await db.commit()
+    return {"ok": True, "matrix": payload.matrix}
+
+
+# -----------------------------------------------------------------------------
+# White-Label Branding lookup (public: reads merchant by slug for self-order)
+# -----------------------------------------------------------------------------
+
+@api_router.get("/branding/by-slug/{slug}")
+async def branding_by_slug(slug: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(M.Merchant).where(M.Merchant.slug == slug))
+    merchant = result.scalar_one_or_none()
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Mitra tidak ditemukan")
+    if merchant.subscription_status == "suspended":
+        raise HTTPException(status_code=403, detail="Masa Langganan/Kerjasama Toko Telah Berakhir. Silakan Hubungi Platform Owner.")
+    return {
+        "id": merchant.id,
+        "name": merchant.name,
+        "slug": merchant.slug,
+        "logo_url": merchant.logo_url,
+        "theme_color": merchant.theme_color,
+        "banner_url": merchant.banner_url,
+        "receipt_header": merchant.receipt_header,
+        "receipt_footer": merchant.receipt_footer,
+        "subscription_status": merchant.subscription_status,
+        "features_enabled": merchant.features_enabled or {},
+    }
+
+
+@api_router.get("/branding/current")
+async def branding_current(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
+    """Returns the branding for the logged-in user's tenant merchant."""
+    if not user.merchant_id:
+        # Super Admin / Admin without merchant: return platform default
+        return {"id": "", "name": "MJD Kupi", "theme_color": "#f97316", "logo_url": "", "banner_url": "", "subscription_status": "active", "features_enabled": {}}
+    result = await db.execute(select(M.Merchant).where(M.Merchant.id == user.merchant_id))
+    merchant = result.scalar_one_or_none()
+    if not merchant:
+        return {"id": "", "name": "MJD Kupi", "theme_color": "#f97316", "logo_url": "", "banner_url": "", "subscription_status": "active", "features_enabled": {}}
+    return {
+        "id": merchant.id, "name": merchant.name, "slug": merchant.slug,
+        "logo_url": merchant.logo_url, "theme_color": merchant.theme_color,
+        "banner_url": merchant.banner_url, "receipt_header": merchant.receipt_header,
+        "receipt_footer": merchant.receipt_footer, "subscription_status": merchant.subscription_status,
+        "features_enabled": merchant.features_enabled or {},
+    }
+
+
+# -----------------------------------------------------------------------------
 # Startup: create tables + seed demo data
 # -----------------------------------------------------------------------------
 
@@ -1219,8 +1674,31 @@ async def bootstrap():
             "ALTER TABLE mjd_expenses ADD COLUMN IF NOT EXISTS shift_id VARCHAR(36)",
             "ALTER TABLE mjd_outlets ADD COLUMN IF NOT EXISTS phone VARCHAR(32) DEFAULT ''",
             "ALTER TABLE mjd_users ADD COLUMN IF NOT EXISTS merchant_id VARCHAR(36)",
+            "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS outlet_id VARCHAR(36) DEFAULT 'outlet-sudirman'",
+            "ALTER TABLE mjd_stock_logs ADD COLUMN IF NOT EXISTS outlet_id VARCHAR(36) DEFAULT 'outlet-sudirman'",
+            "ALTER TABLE mjd_stock_logs ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
+            "ALTER TABLE mjd_stock_logs ADD COLUMN IF NOT EXISTS user_name VARCHAR(120) DEFAULT ''",
+            "ALTER TABLE mjd_kitchen_orders ADD COLUMN IF NOT EXISTS outlet_id VARCHAR(36) DEFAULT 'outlet-sudirman'",
+            "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS outlet_id VARCHAR(36) DEFAULT 'outlet-sudirman'",
+            "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS customer_name VARCHAR(120) DEFAULT ''",
+            "ALTER TABLE mjd_sales ADD COLUMN IF NOT EXISTS status VARCHAR(16) DEFAULT 'paid'",
+            "ALTER TABLE mjd_sales ADD COLUMN IF NOT EXISTS void_reason TEXT DEFAULT ''",
+            "ALTER TABLE mjd_sales ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ",
+            "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS variants JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS slug VARCHAR(64)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_merchant_slug ON mjd_merchants(slug)",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS logo_url TEXT DEFAULT ''",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS theme_color VARCHAR(16) DEFAULT '#f97316'",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS banner_url TEXT DEFAULT ''",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS receipt_header TEXT DEFAULT ''",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS receipt_footer TEXT DEFAULT ''",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS wifi_password VARCHAR(64) DEFAULT ''",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(16) DEFAULT 'active'",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS features_enabled JSONB DEFAULT '{}'::jsonb",
+            "CREATE INDEX IF NOT EXISTS ix_sales_outlet ON mjd_sales(outlet_id)",
+            "UPDATE mjd_self_orders SET status='Pesanan Diterima' WHERE status='Menunggu kasir'",
             "UPDATE mjd_users SET role='Admin' WHERE role='Merchant Admin'",
-            # SEC: bind demo Vendor user to the first seeded merchant (Barista Kopi) so its queries are scoped.
             "UPDATE mjd_users SET merchant_id='m-barista' WHERE role='Vendor' AND (merchant_id IS NULL OR merchant_id='')",
         ):
             await conn.execute(text(stmt))
