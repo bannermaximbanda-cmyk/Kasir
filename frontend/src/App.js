@@ -11,11 +11,14 @@ import {
 } from "lucide-react";
 import { pairPrinter, directPrint, isPrinterConnected, pairedPrinterName, isPrinterSupported, buildSaleReceipt, buildShiftReport, buildKitchenTicket } from "@/utils/thermalPrinter";
 import { queueSale, drainQueue, queuedCount } from "@/utils/offlineQueue";
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import "@/App.css";
 
 const money = (n) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
+// Leading Zero Fix (#8.1) — attach to onFocus on all number inputs
+const numOnFocus = (e) => { if (e.target.value === "0" || e.target.value === 0) e.target.select(); };
 axios.defaults.withCredentials = true;
 // SEC-001 defense-in-depth: custom header on every request. Cross-site attackers cannot set
 // custom headers on simple requests (triggers CORS preflight which is blocked).
@@ -68,6 +71,7 @@ function AdminApp() {
   const [collapsed, setCollapsed] = useState(() => (typeof window !== "undefined" && localStorage.getItem("mjd_sidebar_collapsed") === "1"));
   const [branding, setBranding] = useState({ name: "MJD Kupi", theme_color: "#f97316", logo_url: "", banner_url: "" });
   const [featureMatrix, setFeatureMatrix] = useState({}); // { "role:Kasir": {pos:true, kds:false}, "outlet:x": {...} }
+  const [taxConfig, setTaxConfig] = useState({ enabled: false, percent: 0 });
   const [expenses, setExpenses] = useState([]);
   const [shift, setShift] = useState(null);
   const [showShiftOpen, setShowShiftOpen] = useState(false);
@@ -124,6 +128,9 @@ function AdminApp() {
   useEffect(() => {
     if (!session) return;
     setPage(session.role === "Kasir" ? "pos" : session.role === "Vendor" ? "kds" : "overview");
+    // Default consolidated view for admin/super-admin
+    if (session.role === "Super Admin" || session.role === "Admin") setActiveOutlet("all");
+    else setActiveOutlet(session.outlet_id || "outlet-sudirman");
     reloadProducts(); reloadMerchants(); reloadExpenses();
     axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {});
     axios.get(`${API}/settings/logo`).then(({ data }) => setBrandLogo(data?.logo_data || "")).catch(() => {});
@@ -134,6 +141,9 @@ function AdminApp() {
       } catch {}
     }).catch(() => {});
     axios.get(`${API}/feature-toggles`).then(({ data }) => setFeatureMatrix(data?.matrix || {})).catch(() => {});
+    axios.get(`${API}/settings/tax_config`).then(({ data }) => {
+      if (data && typeof data === "object") setTaxConfig({ enabled: !!data.enabled, percent: Number(data.percent || 0) });
+    }).catch(() => {});
     if (session.role === "Kasir") reloadShift();
     // Setup WebAudio chime
     chimeRef.current = () => {
@@ -176,7 +186,7 @@ function AdminApp() {
     [products, category, query]
   );
   const subtotal = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
-  const tax = Math.round(subtotal * 0.1);
+  const tax = taxConfig.enabled && taxConfig.percent > 0 ? Math.round(subtotal * (taxConfig.percent / 100)) : 0;
   const total = subtotal + tax;
 
   const addToCart = (product, variant = null, notes = "") => setCart((cur) => {
@@ -290,12 +300,23 @@ function AdminApp() {
           <button className="mobile-menu" data-testid="open-sidebar-button" onClick={() => setSidebar(true)}><Menu size={20} /></button>
           <div className="breadcrumb"><span>MJD Kupi</span><b>/</b><strong>{pageTitle}</strong></div>
           <div className="top-actions">
-            <div className="merchant-switch">
+            <div className="merchant-switch" data-testid="outlet-switcher-wrapper">
               <Building2 size={16} />
-              <select value={activeOutlet} onChange={(e) => setActiveOutlet(e.target.value)} data-testid="outlet-switcher">
+              <select value={activeOutlet} onChange={(e) => {
+                if (e.target.value === "__add__") { setPage("settings"); notify("Tambah outlet dari menu Pengaturan Sistem"); return; }
+                setActiveOutlet(e.target.value);
+              }} data-testid="outlet-switcher">
+                {(role === "Super Admin" || role === "Admin") && <option value="all">🏢 Semua Outlet (Konsolidasi)</option>}
                 {outlets.length ? outlets.map((o) => <option value={o.id} key={o.id}>{o.name}</option>) : <option value="outlet-sudirman">Outlet Sudirman</option>}
+                {(role === "Super Admin") && <option value="__add__">+ Tambah Outlet Baru…</option>}
               </select>
               <ChevronDown size={14} />
+              <span className={`outlet-badge ${activeOutlet === "all" ? "all" : ""}`}>{activeOutlet === "all" ? "Semua" : "Aktif"}</span>
+            </div>
+            <div className="ops-status" data-testid="ops-status">
+              <i className="pulse" /> POS: Online
+              {session.role === "Kasir" && shift && <> · <b>Shift: Active ({session.name.split(" ")[0]})</b></>}
+              {session.role === "Kasir" && !shift && <> · <em>Shift belum dibuka</em></>}
             </div>
             <div className="role-chip" data-testid="current-user-role">{session.name} · {session.role}</div>
             {(!online || offlineQueued > 0) && <div className="offline-chip" data-testid="offline-chip">{!online ? "🔌 OFFLINE" : `⏳ ${offlineQueued} pending`}</div>}
@@ -305,10 +326,10 @@ function AdminApp() {
         </header>
 
         <div className="page-wrap">
-          {page === "overview" && <Overview products={products} expenses={expenses} setPage={setPage} />}
+          {page === "overview" && <Overview products={products} expenses={expenses} setPage={setPage} activeOutlet={activeOutlet} />}
           {page === "pos" && (
             <POS products={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory}
-                 cart={cart} addToCart={addToCart} adjustCart={adjustCart} subtotal={subtotal} tax={tax} total={total}
+                 cart={cart} addToCart={addToCart} adjustCart={adjustCart} subtotal={subtotal} tax={tax} total={total} taxConfig={taxConfig}
                  onPay={openPayment} shift={shift} role={session.role}
                  onlineOrders={onlineOrders} openOnline={() => setShowOnlineOrders(true)}
                  openHistory={() => setShowHistory(true)} />
@@ -351,52 +372,145 @@ function QuickAction({ icon: Icon, title, detail, onClick }) {
   return <button className="quick-action" data-testid={`quick-${title.toLowerCase().replaceAll(" ", "-")}`} onClick={onClick}><div><Icon size={18} /></div><span><b>{title}</b><small>{detail}</small></span><strong>→</strong></button>;
 }
 
-// -------- Overview --------
-function Overview({ products, expenses, setPage }) {
-  const [dash, setDash] = useState({ sales_total: 0, expense_total: 0, transaction_count: 0 });
-  useEffect(() => { axios.get(`${API}/dashboard`).then(({ data }) => setDash(data)).catch(() => {}); }, []);
-  const stock = products.reduce((a, p) => a + (p.stock || 0), 0);
+// -------- Overview (Enterprise Dashboard v2) --------
+
+function Overview({ products, expenses, setPage, activeOutlet }) {
+  const [data, setData] = useState(null);
+  const [mode, setMode] = useState("daily");
+  const load = () => axios.get(`${API}/dashboard/analytics`, { params: { mode, outlet_id: activeOutlet } }).then(({ data }) => setData(data)).catch(() => {});
+  useEffect(() => { load(); }, [mode, activeOutlet]);
+  if (!data) return <div className="dash-loading">Memuat analytics…</div>;
+  const kpi = data.kpi || {};
+  const growth = kpi.sales_growth_percent || 0;
+  const pieColors = ["#f97316", "#10b981", "#3b82f6", "#8b5cf6", "#f59e0b", "#ef4444"];
+  const marginPct = kpi.sales_today ? Math.round(((kpi.sales_today - kpi.expenses_total) / kpi.sales_today) * 100) : 0;
   return <>
-    <SectionHeader eyebrow="SELAMAT DATANG" title="Ringkasan operasional" description="Pantau kesehatan Outlet dalam satu pandangan."
+    <SectionHeader eyebrow={`RINGKASAN OPERASIONAL · ${data.outlet_scope === "all" ? "Semua Outlet" : "Outlet aktif"}`} title="Dashboard operasional"
+      description="Pantau kesehatan bisnis, tren penjualan, dan alert stok dalam satu pandangan."
       action={<button className="primary-btn" data-testid="overview-pos-button" onClick={() => setPage("pos")}><CreditCard size={16} /> Buka Terminal POS</button>} />
-    <div className="metric-grid">
-      <Metric label="Penjualan hari ini" value={money(dash.sales_total)} change="Sinkron Supabase" tone="orange" icon={Receipt} />
-      <Metric label="Transaksi selesai" value={dash.transaction_count} change="live realtime" tone="green" icon={ShoppingCart} />
-      <Metric label="Laba kotor" value={money(Math.max(0, dash.sales_total * 0.38))} change="≈38% margin" tone="blue" icon={BarChart3} />
-      <Metric label="Pengeluaran" value={money(dash.expense_total)} change={`${expenses.length} entri`} tone="red" icon={Wallet} />
+    {/* Row 1 · KPI Cards */}
+    <div className="kpi-grid" data-testid="kpi-grid">
+      <div className="kpi-card orange" data-testid="kpi-sales">
+        <div className="kpi-head"><span>Total Penjualan</span><div className="kpi-icon"><Receipt size={16}/></div></div>
+        <strong className="tabular">{money(kpi.sales_today)}</strong>
+        <div className={`kpi-badge ${growth >= 0 ? "up" : "down"}`}>{growth >= 0 ? "▲" : "▼"} {Math.abs(growth)}% vs kemarin</div>
+      </div>
+      <div className="kpi-card green" data-testid="kpi-transactions">
+        <div className="kpi-head"><span>Total Transaksi</span><div className="kpi-icon"><ShoppingCart size={16}/></div></div>
+        <strong className="tabular">{kpi.transactions_today} Transaksi</strong>
+        <div className="kpi-badge neutral">Basket size {money(kpi.avg_basket)}</div>
+      </div>
+      <div className="kpi-card blue" data-testid="kpi-profit">
+        <div className="kpi-head"><span>Laba Bersih</span><div className="kpi-icon"><BarChart3 size={16}/></div></div>
+        <strong className={`tabular ${kpi.net_profit < 0 ? "negative" : ""}`}>{money(kpi.net_profit)}</strong>
+        <div className={`kpi-badge ${marginPct >= 0 ? "up" : "down"}`}>Margin {marginPct}%</div>
+      </div>
+      <div className="kpi-card red" data-testid="kpi-expenses">
+        <div className="kpi-head"><span>Total Pengeluaran</span><div className="kpi-icon"><Wallet size={16}/></div></div>
+        <strong className="tabular">{money(kpi.expenses_total)}</strong>
+        <div className="kpi-badge neutral">{expenses.length} entri tercatat</div>
+      </div>
     </div>
-    <div className="content-grid">
-      <section className="panel chart-panel">
-        <div className="panel-head"><div><h2>Performa penjualan</h2><span>Ringkasan · sinkron Supabase</span></div><button className="date-chip" data-testid="sales-period-button">7 hari <ChevronDown size={14} /></button></div>
-        <div className="chart">
-          <div className="chart-y"><span>4jt</span><span>3jt</span><span>2jt</span><span>1jt</span><span>0</span></div>
-          <div className="bars">{[54, 72, 48, 86, 66, 92, 78].map((h, i) => <div className="bar-col" key={i}><div className={`bar ${i === 5 ? "selected" : ""}`} style={{ height: `${h}%` }}><b>{i === 5 ? "3,9jt" : ""}</b></div><span>{["Sen","Sel","Rab","Kam","Jum","Sab","Min"][i]}</span></div>)}</div>
+    {/* Row 2 · Charts */}
+    <div className="analytics-grid">
+      <section className="panel analytics-panel" data-testid="sales-trend-panel">
+        <div className="panel-head">
+          <div><h2>Performa Penjualan & Tren</h2><span>{mode === "hourly" ? "Per jam · hari ini" : "7 hari terakhir"}</span></div>
+          <div className="mode-toggle">
+            <button className={mode === "hourly" ? "active" : ""} onClick={() => setMode("hourly")} data-testid="trend-hourly">Jam</button>
+            <button className={mode === "daily" ? "active" : ""} onClick={() => setMode("daily")} data-testid="trend-daily">Harian</button>
+          </div>
+        </div>
+        <div style={{ width: "100%", height: 260 }}>
+          <ResponsiveContainer>
+            <AreaChart data={data.trend} margin={{ top: 5, right: 12, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="salesGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#f97316" stopOpacity={0.4}/>
+                  <stop offset="100%" stopColor="#f97316" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <XAxis dataKey="label" stroke="#9aa4b2" fontSize={10} />
+              <YAxis stroke="#9aa4b2" fontSize={10} tickFormatter={(v) => v >= 1000000 ? `${(v/1000000).toFixed(1)}jt` : `${(v/1000).toFixed(0)}rb`} />
+              <RTooltip contentStyle={{ background: "#1f2933", border: 0, borderRadius: 8, fontSize: 11, color: "#fff" }} formatter={(v, n) => n === "gross" ? [money(v), "Omset"] : [v, "Transaksi"]} />
+              <Area type="monotone" dataKey="gross" stroke="#f97316" strokeWidth={2} fill="url(#salesGrad)" />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
       </section>
-      <section className="panel quick-panel">
-        <div className="panel-head"><div><h2>Aksi cepat</h2><span>Alur yang sering dipakai</span></div></div>
-        <QuickAction icon={Plus} title="Tambah produk" detail="Buat menu baru & atur HPP" onClick={() => setPage("products")} />
-        <QuickAction icon={Package} title="Restock inventori" detail={`${stock} unit stok tercatat`} onClick={() => setPage("inventory")} />
-        <QuickAction icon={Wallet} title="Catat pengeluaran" detail="Tambah biaya operasional" onClick={() => setPage("expenses")} />
-        <QuickAction icon={Store} title="Kelola merchant" detail="Tambah tenant baru" onClick={() => setPage("merchants")} />
+      <section className="panel analytics-panel" data-testid="payment-donut-panel">
+        <div className="panel-head"><div><h2>Metode Pembayaran</h2><span>30 hari terakhir</span></div></div>
+        <div style={{ width: "100%", height: 260 }}>
+          {data.payment_breakdown?.length ? <ResponsiveContainer>
+            <PieChart>
+              <Pie data={data.payment_breakdown} dataKey="total" nameKey="method" innerRadius={60} outerRadius={95} paddingAngle={3}>
+                {data.payment_breakdown.map((_, i) => <Cell key={i} fill={pieColors[i % pieColors.length]} />)}
+              </Pie>
+              <Legend verticalAlign="bottom" iconType="circle" formatter={(v) => <span style={{ fontSize: 11, color: "#596574" }}>{v}</span>} />
+              <RTooltip formatter={(v) => money(v)} contentStyle={{ background: "#1f2933", border: 0, borderRadius: 8, fontSize: 11, color: "#fff" }} />
+            </PieChart>
+          </ResponsiveContainer> : <div className="empty-cart"><CreditCard size={26} /><b>Belum ada transaksi</b></div>}
+        </div>
       </section>
     </div>
-    <section className="panel table-panel">
-      <div className="panel-head"><div><h2>Stok menipis</h2><span>Perlu perhatian hari ini</span></div><button className="text-btn" data-testid="inventory-table-link" onClick={() => setPage("inventory")}>Lihat semua <span>→</span></button></div>
-      <div className="stock-list">
-        {products.filter((p) => p.stock < 20).slice(0, 4).map((p) => <div className="stock-row" key={p.id}>
-          <div className="product-dot" style={{ background: p.color }}><Coffee size={15} /></div>
-          <div className="stock-name"><b>{p.name}</b><span>{p.vendor}</span></div>
-          <div className="stock-progress"><div><span style={{ width: `${Math.min(p.stock * 4, 100)}%` }} /></div><small>{p.stock} unit tersisa</small></div>
-          <span className="warning-badge">Restock</span>
-        </div>)}
+    {/* Row 3 · Inventory + Top + Quick Actions */}
+    <div className="ops-grid">
+      <section className="panel ops-panel red" data-testid="lowstock-panel">
+        <div className="panel-head"><div><h2>Stok Menipis</h2><span>Butuh restock segera</span></div><button className="text-btn" onClick={() => setPage("inventory")}>Semua →</button></div>
+        <div className="lowstock-list">
+          {data.low_stock?.length ? data.low_stock.slice(0, 5).map((p) => <div className="lowstock-row" key={p.id}>
+            <div className="ls-info"><b>{p.name}</b><span>{p.vendor} · {p.outlet_id.replace("outlet-", "")}</span></div>
+            <div className="ls-stock">
+              <strong className={p.stock === 0 ? "danger" : "warn"}>{p.stock}</strong>
+              <small>/ min {p.min}</small>
+            </div>
+            <button className="restock-btn" onClick={() => setPage("inventory")} data-testid={`restock-${p.id}`}>Restock</button>
+          </div>) : <div className="empty-hint">Semua stok aman ✓</div>}
+        </div>
+      </section>
+      <section className="panel ops-panel" data-testid="top-products-panel">
+        <div className="panel-head"><div><h2>Top 5 Produk Terlaris</h2><span>Volume 30 hari</span></div></div>
+        <div className="top-list">
+          {data.top_products?.length ? data.top_products.map((p, i) => {
+            const maxQty = data.top_products[0]?.quantity || 1;
+            const pct = Math.round((p.quantity / maxQty) * 100);
+            return <div className="top-row" key={p.product_id}>
+              <div className="top-info"><span className="top-rank">#{i+1}</span><b>{p.name}</b></div>
+              <div className="top-bar"><div style={{ width: `${pct}%` }} /></div>
+              <div className="top-meta"><strong>{p.quantity}</strong><small>{money(p.revenue)}</small></div>
+            </div>;
+          }) : <div className="empty-hint">Belum ada data penjualan</div>}
+        </div>
+      </section>
+      <section className="panel ops-panel" data-testid="quick-actions-panel">
+        <div className="panel-head"><div><h2>Aksi Cepat</h2><span>Shortcut ke alur utama</span></div></div>
+        <div className="quick-list">
+          <QuickAction icon={Plus} title="Tambah produk" detail="Buat menu baru & atur HPP" onClick={() => setPage("products")} />
+          <QuickAction icon={Package} title="Restock inventori" detail={`${products.reduce((a,p)=>a+(p.stock||0),0)} unit tercatat`} onClick={() => setPage("inventory")} />
+          <QuickAction icon={Wallet} title="Catat pengeluaran" detail="Tambah biaya operasional" onClick={() => setPage("expenses")} />
+          <QuickAction icon={PlayCircle} title="Buka Shift Kasir" detail="Mulai sesi terminal POS" onClick={() => setPage("pos")} />
+        </div>
+      </section>
+    </div>
+    {/* Row 4 · Outlet Comparison (only when 'Semua Outlet') */}
+    {data.outlet_compare?.length > 0 && <section className="panel outlet-compare" data-testid="outlet-compare-panel">
+      <div className="panel-head"><div><h2>Perbandingan Antar Outlet</h2><span>Omset 30 hari · sinkron Supabase</span></div></div>
+      <div style={{ width: "100%", height: 220 }}>
+        <ResponsiveContainer>
+          <BarChart data={data.outlet_compare} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+            <XAxis dataKey="name" stroke="#9aa4b2" fontSize={11} />
+            <YAxis stroke="#9aa4b2" fontSize={10} tickFormatter={(v) => v >= 1000000 ? `${(v/1000000).toFixed(1)}jt` : `${(v/1000).toFixed(0)}rb`} />
+            <RTooltip formatter={(v, n) => n === "gross" ? [money(v), "Omset"] : [v, "Transaksi"]} contentStyle={{ background: "#1f2933", border: 0, borderRadius: 8, fontSize: 11, color: "#fff" }} />
+            <Bar dataKey="gross" fill="#f97316" radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
       </div>
-    </section>
+    </section>}
   </>;
 }
 
 // -------- POS --------
-function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, onPay, shift, role, onlineOrders, openOnline, openHistory }) {
+function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, taxConfig, onPay, shift, role, onlineOrders, openOnline, openHistory }) {
   const locked = role === "Kasir" && !shift;
   const [variantPick, setVariantPick] = useState(null); // { product }
   const handleProductClick = (p) => {
@@ -452,7 +566,7 @@ function POS({ products, query, setQuery, category, setCategory, cart, addToCart
         </div>
         <div className="cart-summary">
           <div><span>Subtotal ({cart.reduce((a, i) => a + i.qty, 0)} item)</span><b>{money(subtotal)}</b></div>
-          <div><span>PPN (10%)</span><b>{money(tax)}</b></div>
+          {taxConfig?.enabled && taxConfig.percent > 0 && <div data-testid="cart-tax-row"><span>PPN ({taxConfig.percent}%)</span><b>{money(tax)}</b></div>}
           <div className="total-line"><span>Total pembayaran</span><strong>{money(total)}</strong></div>
           <button className="pay-btn" disabled={!cart.length} onClick={onPay} data-testid="pay-order-button"><CreditCard size={17} /> Bayar sekarang <span>→</span></button>
           <button className="manual-btn" data-testid="manual-order-button"><Plus size={15} /> Tambah item manual</button>
@@ -511,7 +625,7 @@ function PaymentModal({ total, onClose, onConfirm }) {
       </div>
       {method === "Cash" && <div className="pay-body">
         <label>Nominal diterima</label>
-        <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} data-testid="cash-received-input" />
+        <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} onFocus={numOnFocus} data-testid="cash-received-input" />
         <div className="quick-cash">{[50000, 100000, 200000, total].map((v) => <button key={v} onClick={() => setCash(v)} data-testid={`quick-cash-${v}`}>{money(v)}</button>)}</div>
         <div className="change-line"><span>Kembalian</span><strong>{money(change)}</strong></div>
       </div>}
@@ -745,7 +859,7 @@ function StockModal({ title, products, kind, onClose, onSubmit }) {
       <label>Produk</label>
       <select value={pid} onChange={(e) => setPid(e.target.value)} data-testid="stock-product-select">{filtered.map((p) => <option key={p.id} value={p.id}>{p.name} (stok {p.stock})</option>)}</select>
       <label>{kind === "opname" ? "Stok fisik aktual" : "Jumlah"}</label>
-      <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Masukkan angka" data-testid="stock-qty-input" />
+      <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} onFocus={numOnFocus} placeholder="Masukkan angka" data-testid="stock-qty-input" />
       <label>Catatan</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Nomor nota / alasan" data-testid="stock-note-input" />
     </div>
@@ -796,7 +910,7 @@ function ExpenseModal({ onClose, onSaved, session, shift }) {
       <label>Keterangan</label>
       <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} data-testid="expense-note-input" />
       <label>Nominal (Rp)</label>
-      <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="Masukkan nominal" data-testid="expense-amount-input" />
+      <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} onFocus={numOnFocus} placeholder="Masukkan nominal" data-testid="expense-amount-input" />
       <label>Tanggal</label>
       <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} data-testid="expense-date-input" />
       <label>Metode</label>
@@ -838,9 +952,9 @@ function Products({ products, merchants, reload, notify }) {
           <label className="field-lg"><span>Nama produk</span><input id="new-product" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Contoh: Es Kopi Pandan" data-testid="product-name-input" /></label>
           <label><span>Merchant</span><select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
           <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
-          <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} placeholder="0" data-testid="product-price-input" /></label>
-          <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} placeholder="0" data-testid="product-cost-input" /></label>
-          <label><span>Stok awal</span><input type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} placeholder="0" data-testid="product-stock-input" /></label>
+          <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} onFocus={numOnFocus} placeholder="0" data-testid="product-price-input" /></label>
+          <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} onFocus={numOnFocus} placeholder="0" data-testid="product-cost-input" /></label>
+          <label><span>Stok awal</span><input type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} onFocus={numOnFocus} placeholder="0" data-testid="product-stock-input" /></label>
         </div>
       </div>
       <div className="variant-editor" data-testid="variant-editor">
@@ -852,8 +966,8 @@ function Products({ products, merchants, reload, notify }) {
           {form.variants.map((v, i) => (
             <div className="ve-row" key={i}>
               <input value={v.name} onChange={(e) => updFormVariant(i, { name: e.target.value })} placeholder="Panas / Ice / Large" data-testid={`variant-name-${i}`} />
-              <input type="number" value={v.price} onChange={(e) => updFormVariant(i, { price: Number(e.target.value) })} data-testid={`variant-price-${i}`} />
-              <input type="number" value={v.cost} onChange={(e) => updFormVariant(i, { cost: Number(e.target.value) })} data-testid={`variant-cost-${i}`} />
+              <input type="number" value={v.price} onChange={(e) => updFormVariant(i, { price: Number(e.target.value) })} onFocus={numOnFocus} data-testid={`variant-price-${i}`} />
+              <input type="number" value={v.cost} onChange={(e) => updFormVariant(i, { cost: Number(e.target.value) })} onFocus={numOnFocus} data-testid={`variant-cost-${i}`} />
               <label className="switch"><input type="checkbox" checked={v.active !== false} onChange={(e) => updFormVariant(i, { active: e.target.checked })} /><i /></label>
               <button className="icon-danger" type="button" onClick={() => rmFormVariant(i)} data-testid={`remove-variant-${i}`}><Trash2 size={13}/></button>
             </div>
@@ -898,8 +1012,8 @@ function VariantEditModal({ product, onClose, onSaved }) {
       <div className="ve-row ve-label"><span>Nama Varian</span><span>Harga Jual</span><span>HPP</span><span>Aktif</span><span/></div>
       {rows.map((v, i) => <div className="ve-row" key={i}>
         <input value={v.name} onChange={(e) => upd(i, { name: e.target.value })} placeholder="Panas / Ice / Large" data-testid={`edit-var-name-${i}`}/>
-        <input type="number" value={v.price} onChange={(e) => upd(i, { price: Number(e.target.value) })} data-testid={`edit-var-price-${i}`}/>
-        <input type="number" value={v.cost} onChange={(e) => upd(i, { cost: Number(e.target.value) })} data-testid={`edit-var-cost-${i}`}/>
+        <input type="number" value={v.price} onChange={(e) => upd(i, { price: Number(e.target.value) })} onFocus={numOnFocus} data-testid={`edit-var-price-${i}`}/>
+        <input type="number" value={v.cost} onChange={(e) => upd(i, { cost: Number(e.target.value) })} onFocus={numOnFocus} data-testid={`edit-var-cost-${i}`}/>
         <label className="switch"><input type="checkbox" checked={v.active !== false} onChange={(e) => upd(i, { active: e.target.checked })}/><i/></label>
         <button className="icon-danger" onClick={() => rm(i)}><Trash2 size={13}/></button>
       </div>)}
@@ -931,7 +1045,7 @@ function Merchants({ merchants, reload, notify }) {
       <div className="form-fields">
         <label>Nama<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="merchant-name-input" /></label>
         <label>Kategori<select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="merchant-category-select">{["F&B", "Kopi", "Makanan", "Snack", "Minuman"].map((c) => <option key={c}>{c}</option>)}</select></label>
-        <label>Komisi %<input type="number" value={form.commission_percent} onChange={(e) => setForm({ ...form, commission_percent: Number(e.target.value) })} data-testid="merchant-commission-input" /></label>
+        <label>Komisi %<input type="number" value={form.commission_percent} onChange={(e) => setForm({ ...form, commission_percent: Number(e.target.value) })} onFocus={numOnFocus} data-testid="merchant-commission-input" /></label>
         <label>WhatsApp (628…)<input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} data-testid="merchant-phone-input" /></label>
         <button className="primary-btn" onClick={save} data-testid="save-merchant-button">Simpan</button>
       </div>
@@ -1085,7 +1199,7 @@ function Tables({ notify }) {
   return <>
     <SectionHeader eyebrow="SELF-ORDER STUDIO" title="QR meja pelanggan" description="Generate QR asli yang bisa di-scan kamera HP. Setiap kartu meja unik dan siap cetak."
       action={<div className="row-gap">
-        <label className="mini-num">Jumlah meja<input type="number" value={count} min={1} max={100} onChange={(e) => setCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} data-testid="tables-count-input" /></label>
+        <label className="mini-num">Jumlah meja<input type="number" value={count} min={1} max={100} onChange={(e) => setCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} onFocus={numOnFocus} data-testid="tables-count-input" /></label>
         <button className="primary-btn" data-testid="generate-qr-button" onClick={() => notify(`QR ${count} meja siap`)}><Plus size={16} /> Generate</button>
       </div>} />
     <div className="table-grid-v2">
@@ -1282,9 +1396,49 @@ function SettingsPage({ notify, role }) {
       </section>
     </>}
     {(role === "Super Admin" || role === "Admin") && <PaymentSettings notify={notify} />}
+    {(role === "Super Admin" || role === "Admin") && <TaxSettings notify={notify} />}
     {(role === "Super Admin" || role === "Admin") && <PinGenerator notify={notify} />}
     {isSuper && <FeatureToggleMatrix notify={notify} outlets={outlets} />}
   </>;
+}
+
+// -------- PPN / Tax Settings (Feature #7.3) --------
+function TaxSettings({ notify }) {
+  const [cfg, setCfg] = useState({ enabled: false, percent: 10 });
+  useEffect(() => {
+    axios.get(`${API}/settings/tax_config`).then(({ data }) => {
+      if (data && typeof data === "object") setCfg({ enabled: !!data.enabled, percent: Number(data.percent || 10) });
+    }).catch(() => {});
+  }, []);
+  const save = async () => {
+    try {
+      await axios.post(`${API}/settings`, { key: "tax_config", value: { enabled: cfg.enabled, percent: Number(cfg.percent) } });
+      notify(cfg.enabled ? `PPN ${cfg.percent}% aktif — akan diterapkan di POS & struk` : "PPN dinonaktifkan (0%)");
+    } catch (e) { notify("Gagal simpan pengaturan PPN"); }
+  };
+  return <section className="panel product-form-v2" data-testid="tax-settings-panel">
+    <div className="form-heading"><div className="form-icon"><Receipt size={18}/></div>
+      <div><h2>Pajak / PPN Restoran</h2><span>Aktif/nonaktifkan pajak restoran. Diterapkan real-time di POS, Self-Order, dan struk.</span></div>
+    </div>
+    <div className="tax-row">
+      <label className="switch-lg" data-testid="tax-toggle-wrapper">
+        <input type="checkbox" checked={cfg.enabled} onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} data-testid="tax-toggle" />
+        <i />
+        <span>{cfg.enabled ? "PPN AKTIF" : "PPN NONAKTIF"}</span>
+      </label>
+      <label className="tax-percent">
+        <span>Persentase PPN (%)</span>
+        <input type="number" value={cfg.percent} min={0} max={20} disabled={!cfg.enabled}
+          onFocus={numOnFocus} onChange={(e) => setCfg({ ...cfg, percent: Number(e.target.value) })}
+          data-testid="tax-percent-input" />
+      </label>
+      <div className="tax-preview" data-testid="tax-preview">
+        <b>Preview subtotal Rp 100.000</b>
+        <span>Total: {money(100000 + (cfg.enabled ? Math.round(100000 * cfg.percent / 100) : 0))}</span>
+      </div>
+      <button className="primary-btn" onClick={save} data-testid="save-tax-config"><Check size={14}/> Simpan</button>
+    </div>
+  </section>;
 }
 
 // -------- Feature Toggle Matrix (Super Admin only) --------
@@ -1512,7 +1666,7 @@ function ShiftOpenModal({ onClose, onOpened }) {
     <div className="pay-head"><h2>Buka shift kasir</h2><span>Masukkan kas awal drawer</span></div>
     <div className="pay-body">
       <label>Kas awal (Rp)</label>
-      <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} data-testid="shift-open-cash-input" />
+      <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} onFocus={numOnFocus} data-testid="shift-open-cash-input" />
       <label>Catatan (opsional)</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} data-testid="shift-open-note-input" />
     </div>
@@ -1532,7 +1686,7 @@ function ShiftCloseModal({ shift, onClose, onClosed }) {
     <div className="pay-head"><h2>Tutup shift kasir</h2><span>Kas awal: {money(shift.opening_cash)}</span></div>
     <div className="pay-body">
       <label>Kas fisik dihitung (Rp)</label>
-      <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} data-testid="shift-close-cash-input" />
+      <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} onFocus={numOnFocus} data-testid="shift-close-cash-input" />
       <label>Catatan</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} data-testid="shift-close-note-input" />
       <div className="hint">Sistem akan otomatis menghitung selisih vs total kas penjualan dan menampilkan rincian shift.</div>

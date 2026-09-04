@@ -1,0 +1,42 @@
+{
+  "summary": "Iteration 12 (MJD Kupi Batch A) backend validation. New test file /app/backend/tests/test_iteration12_dashboard_tax.py — 9 tests covering server-authoritative tax_config (OFF default: tax=0 total==subtotal even when client sends tax=999; ON 11%: tax=round(subtotal*0.11), client-sent tax=0 IGNORED and overridden; GET /api/settings/tax_config round-trip), Dashboard analytics (daily mode → 7 trend items with label/gross/count, hourly mode → 24 items labeled 00:00..23:00, outlet_id=all → outlet_scope='all' and outlet_compare non-empty, outlet_id=outlet-kemang → outlet_scope='outlet-kemang' and outlet_compare==[], Kasir role ignores outlet_id param and is scoped to own outlet), and Dashboard basic (outlet_id=all → keys sales_total/expense_total/transaction_count/net_profit/outlet_scope='all'). ALL 9/9 PASSED. Regression: iter11 15/15 + iter10 25/25 = 40/40 PASSED sequentially (-n 0). tax_config restored to {enabled:false, percent:10} via module autouse fixture at suite end.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/settings/{key}", "issue": "Unauthenticated / any role can read tax_config (no auth dependency). POST is properly gated to Super Admin/Admin. Low risk (public tax rate) but inconsistent — consider requiring auth on GET too."},
+      {"endpoint": "GET /api/dashboard/analytics KPI week_expense", "issue": "Naming misleading: variable is called `week_expense` but the query has no date filter — it sums ALL expenses ever for the scope, then is exposed as kpi.expenses_total and used in net_profit. Either add >=last_week_start filter or rename. Current test doesn't assert value so passes."},
+      {"endpoint": "GET /api/dashboard/analytics low_stock", "issue": "When user is Kasir/Vendor scope is forced to their outlet — good; but low_stock query filters by Product.outlet_id which is stable. Products that have no outlet_id will be excluded even in scope=all. Verify seed data has outlet_id set on all products."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration12_dashboard_tax.py",
+    "/app/test_reports/pytest/iteration_12_results.xml",
+    "/app/test_reports/pytest/iteration_12_regression.xml"
+  ],
+  "action_items": [
+    "Consider adding auth requirement on GET /api/settings/{key} for consistency (low priority).",
+    "Fix or rename kpi.expenses_total in /api/dashboard/analytics — it sums ALL time expenses, not week/period (analytics label suggests time-bounded).",
+    "The tax bypass loophole noted in iter11 is now CLOSED for tax=0 override — server always recomputes from tax_config. Good progress on SEC-005."
+  ],
+  "critical_code_review_comments": [
+    "tax_config is now truly server-authoritative — SaleInput.tax field is completely ignored by create_sale (line 870-874). Recommend removing `tax` from SaleInput schema or documenting it as informational-only to prevent client confusion.",
+    "dashboard_analytics runs many separate awaits in loops (24 hourly slots = 48 SQL round-trips; 7 daily slots = 14 round-trips; per-outlet compare adds 2×N more). This is O(N) latency with the DB. Consider a single GROUP BY date_trunc/hour query. Currently ~1-3s but will degrade with scale.",
+    "base_where() closure captures `scope` from enclosing function — fine, but week_expense stmt does NOT use base_where and has ternary select() that skips the outlet filter entirely when scope is None (correct) — however it never filters by time. Bug: kpi.expenses_total is unbounded time.",
+    "server.py is now 1959 lines (was 1813 in iter11). Still well over the 700-line guideline — split routers/{dashboard,sales,settings}.py.",
+    "outlet_compare loop issues 2 queries per outlet (N outlets → 2N queries). Merge into a single GROUP BY outlet_id query.",
+    "GET /api/settings/{key} returns {} for missing keys instead of 404. Downstream frontend must distinguish 'never set' from 'empty object'. Consider returning null or 404."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration12_dashboard_tax.py (new)",
+    "/app/test_reports/pytest/iteration_12_results.xml",
+    "/app/test_reports/pytest/iteration_12_regression.xml"
+  ],
+  "success_rate": {"backend": "100% (iter12 9/9 + iter11 15/15 + iter10 25/25 = 49/49)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "Per /app/memory/test_credentials.md (superadmin/.Superadmin1_, kasir/MjdKupi#2026). Both work.",
+  "seed_data_creation": "tax_config setting created and RESTORED to {enabled:false, percent:10} at suite end via autouse fixture. A few TEST_ prefixed sales added under kasir (Meja TAX_OFF, Meja TAX_ON) — do not affect analytics counts materially.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run iter12 alone (works with xdist -n auto — no shift race). For full regression run iter10+iter11+iter12 sequentially (-n 0) due to known iter10 TestShiftLock/TestCashOpname xdist race on shared kasir user. tax_config is server-authoritative now: any test that POSTs /api/sales with client-tax expectations must set tax_config first and always reset to {enabled:false, percent:10} at end. The autouse fixture in test_iteration12 handles reset. Kasir outlet is 'outlet-sudirman' by default.",
+  "rca of the issue": "N/A — no failures. Server-side tax enforcement + dashboard analytics all behaving per spec."
+}

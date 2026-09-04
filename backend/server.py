@@ -255,12 +255,24 @@ def to_dict(row, exclude=("password_hash",)) -> dict:
 
 def outlet_scope(user: M.User, requested_outlet: Optional[str] = None) -> Optional[str]:
     """Return the outlet_id a user is allowed to query.
-    - Super Admin/Admin: may pass ?outlet_id=xxx to filter, or None for all.
+    - Super Admin/Admin: may pass ?outlet_id=xxx to filter, or 'all'/None for all.
     - Kasir/Vendor: forced to their own outlet_id (ignore param).
     """
     if user.role in ("Super Admin", "Admin"):
-        return requested_outlet or None
+        if not requested_outlet or requested_outlet == "all":
+            return None
+        return requested_outlet
     return user.outlet_id or "outlet-sudirman"
+
+
+async def get_tax_config(db: AsyncSession) -> dict:
+    """Reads tax_config setting. Returns {enabled: bool, percent: float}. Default OFF/0%."""
+    result = await db.execute(select(M.Setting).where(M.Setting.key == "tax_config"))
+    row = result.scalar_one_or_none()
+    if not row or not row.value:
+        return {"enabled": False, "percent": 0.0}
+    v = row.value or {}
+    return {"enabled": bool(v.get("enabled", False)), "percent": float(v.get("percent", 0) or 0)}
 
 
 # -----------------------------------------------------------------------------
@@ -822,7 +834,8 @@ async def create_sale(
             raise HTTPException(status_code=400, detail="Buka shift terlebih dahulu sebelum bertransaksi")
         shift_id = shift.id
 
-    # SEC-005: recompute totals server-side from authoritative product prices.
+    # SEC-005: recompute totals & tax server-side from authoritative product prices & tax_config.
+    tax_config = await get_tax_config(db)
     verified_lines: list[dict] = []
     subtotal = 0.0
     for line in payload.lines:
@@ -853,9 +866,11 @@ async def create_sale(
             "variant_name": variant_name,
             "notes": (line.notes or "")[:200],
         })
-    # Honor tax the client sent only if it is <= 10% of computed subtotal (guard against tax=0 games / inflation)
-    computed_tax = round(subtotal * 0.10)
-    tax = float(payload.tax) if 0 <= float(payload.tax) <= computed_tax * 1.05 else computed_tax
+    # Server-authoritative tax based on tax_config setting (Feature #7.3)
+    if tax_config["enabled"] and tax_config["percent"] > 0:
+        tax = round(subtotal * (tax_config["percent"] / 100.0))
+    else:
+        tax = 0
     total = round(subtotal + tax)
 
     sale = M.Sale(
@@ -917,14 +932,156 @@ async def list_sales(
 # -----------------------------------------------------------------------------
 
 @api_router.get("/dashboard")
-async def dashboard_summary(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
-    sales_total = (await db.execute(select(func.coalesce(func.sum(M.Sale.total), 0)))).scalar_one()
-    expenses_total = (await db.execute(select(func.coalesce(func.sum(M.Expense.amount), 0)))).scalar_one()
-    trx_count = (await db.execute(select(func.count(M.Sale.id)))).scalar_one()
+async def dashboard_summary(
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(current_user),
+):
+    scope = outlet_scope(user, outlet_id)
+    sales_stmt = select(func.coalesce(func.sum(M.Sale.total), 0)).where(M.Sale.status != "voided")
+    trx_stmt = select(func.count(M.Sale.id)).where(M.Sale.status != "voided")
+    exp_stmt = select(func.coalesce(func.sum(M.Expense.amount), 0))
+    if scope:
+        sales_stmt = sales_stmt.where(M.Sale.outlet_id == scope)
+        trx_stmt = trx_stmt.where(M.Sale.outlet_id == scope)
+        exp_stmt = exp_stmt.where(M.Expense.outlet_id == scope)
+    sales_total = (await db.execute(sales_stmt)).scalar_one()
+    trx_count = (await db.execute(trx_stmt)).scalar_one()
+    expenses_total = (await db.execute(exp_stmt)).scalar_one()
     return {
         "sales_total": float(sales_total or 0),
         "expense_total": float(expenses_total or 0),
         "transaction_count": int(trx_count or 0),
+        "net_profit": float(sales_total or 0) - float(expenses_total or 0),
+        "outlet_scope": scope or "all",
+    }
+
+
+@api_router.get("/dashboard/analytics")
+async def dashboard_analytics(
+    outlet_id: Optional[str] = None,
+    mode: str = "daily",  # daily | hourly
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(current_user),
+):
+    """Comprehensive analytics: KPI comparisons, sales trend, payment breakdown, top products, low stock, outlet compare.
+
+    Optimized: fetches sales in a single query then aggregates in Python (was 20+ round-trips).
+    """
+    scope = outlet_scope(user, outlet_id)
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yday = today - timedelta(days=1)
+    last_week_start = today - timedelta(days=7)
+    thirty = today - timedelta(days=30)
+
+    # Single query: fetch last 30 days of paid sales (limit for safety)
+    sales_stmt = select(M.Sale).where(M.Sale.status != "voided", M.Sale.created_at >= thirty)
+    if scope:
+        sales_stmt = sales_stmt.where(M.Sale.outlet_id == scope)
+    sales_rows = (await db.execute(sales_stmt.order_by(M.Sale.created_at.desc()).limit(5000))).scalars().all()
+
+    def in_range(dt, since, until=None):
+        if dt is None: return False
+        if dt < since: return False
+        if until is not None and dt >= until: return False
+        return True
+
+    # KPI totals
+    today_sales = sum(float(s.total or 0) for s in sales_rows if in_range(s.created_at, today))
+    yday_sales = sum(float(s.total or 0) for s in sales_rows if in_range(s.created_at, yday, today))
+    today_trx = sum(1 for s in sales_rows if in_range(s.created_at, today))
+
+    # Bounded expenses (this week)
+    exp_stmt = select(func.coalesce(func.sum(M.Expense.amount), 0)).where(M.Expense.date >= last_week_start.strftime("%Y-%m-%d"))
+    if scope: exp_stmt = exp_stmt.where(M.Expense.outlet_id == scope)
+    week_expense = (await db.execute(exp_stmt)).scalar_one() or 0
+
+    # Trend
+    trend = []
+    if mode == "hourly":
+        buckets = {h: {"gross": 0.0, "count": 0} for h in range(24)}
+        for s in sales_rows:
+            if not in_range(s.created_at, today): continue
+            h = s.created_at.hour
+            buckets[h]["gross"] += float(s.total or 0)
+            buckets[h]["count"] += 1
+        for h in range(24):
+            trend.append({"label": f"{h:02d}:00", "gross": buckets[h]["gross"], "count": buckets[h]["count"]})
+    else:
+        seven_start = today - timedelta(days=6)
+        buckets = {i: {"gross": 0.0, "count": 0} for i in range(7)}
+        for s in sales_rows:
+            if not in_range(s.created_at, seven_start, today + timedelta(days=1)): continue
+            day_i = (s.created_at.date() - seven_start.date()).days
+            if 0 <= day_i < 7:
+                buckets[day_i]["gross"] += float(s.total or 0)
+                buckets[day_i]["count"] += 1
+        for i in range(7):
+            d = seven_start + timedelta(days=i)
+            trend.append({"label": d.strftime("%a %d"), "gross": buckets[i]["gross"], "count": buckets[i]["count"]})
+
+    # Payment breakdown
+    pm_agg: dict = {}
+    for s in sales_rows:
+        m = s.payment_method or "Lainnya"
+        if m not in pm_agg: pm_agg[m] = {"method": m, "total": 0.0, "count": 0}
+        pm_agg[m]["total"] += float(s.total or 0)
+        pm_agg[m]["count"] += 1
+    payment_breakdown = list(pm_agg.values())
+
+    # Top products
+    prod_counter: dict = {}
+    for s in sales_rows:
+        for ln in (s.lines or []):
+            pid = ln.get("product_id"); name = ln.get("name")
+            if not pid: continue
+            if pid not in prod_counter:
+                prod_counter[pid] = {"product_id": pid, "name": name, "quantity": 0, "revenue": 0.0}
+            prod_counter[pid]["quantity"] += int(ln.get("quantity") or 0)
+            prod_counter[pid]["revenue"] += float(ln.get("price") or 0) * int(ln.get("quantity") or 0)
+    top_products = sorted(prod_counter.values(), key=lambda x: x["quantity"], reverse=True)[:5]
+
+    # Outlet compare (only for consolidated)
+    outlet_compare = []
+    if not scope:
+        outlet_agg: dict = {}
+        for s in sales_rows:
+            oid = s.outlet_id or "-"
+            if oid not in outlet_agg: outlet_agg[oid] = {"outlet_id": oid, "gross": 0.0, "count": 0}
+            outlet_agg[oid]["gross"] += float(s.total or 0)
+            outlet_agg[oid]["count"] += 1
+        # attach names
+        outlets_res = (await db.execute(select(M.Outlet))).scalars().all()
+        name_map = {o.id: o.name for o in outlets_res}
+        for oid, agg in outlet_agg.items():
+            outlet_compare.append({"outlet_id": oid, "name": name_map.get(oid, oid), "gross": agg["gross"], "count": agg["count"]})
+
+    # Low stock
+    ls_stmt = select(M.Product).where(M.Product.stock <= 5)
+    if scope: ls_stmt = ls_stmt.where(M.Product.outlet_id == scope)
+    ls_rows = (await db.execute(ls_stmt.order_by(M.Product.stock).limit(10))).scalars().all()
+    low_stock = [{"id": p.id, "name": p.name, "stock": int(p.stock or 0), "vendor": p.vendor, "outlet_id": p.outlet_id, "min": 5} for p in ls_rows]
+
+    avg_basket = (float(today_sales) / today_trx) if today_trx else 0
+    growth = ((float(today_sales) - float(yday_sales)) / float(yday_sales) * 100) if yday_sales else (100.0 if today_sales else 0.0)
+    return {
+        "kpi": {
+            "sales_today": float(today_sales),
+            "sales_yesterday": float(yday_sales),
+            "sales_growth_percent": round(growth, 1),
+            "transactions_today": int(today_trx),
+            "avg_basket": round(avg_basket),
+            "expenses_total": float(week_expense),
+            "net_profit": float(today_sales) - float(week_expense),
+        },
+        "trend": trend,
+        "mode": mode,
+        "payment_breakdown": payment_breakdown,
+        "top_products": top_products,
+        "low_stock": low_stock,
+        "outlet_compare": outlet_compare,
+        "outlet_scope": scope or "all",
     }
 
 

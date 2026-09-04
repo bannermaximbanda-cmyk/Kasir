@@ -66,10 +66,25 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
   - `/api/branding/current` + `/api/branding/by-slug/{slug}` for dynamic theming
   - Login enforcement: `subscription_status='suspended'` blocks login with exact Indonesian message
 
+### Iteration 12 (Feb 2026 Batch A — Enterprise Foundation)
+- [x] **PPN / Tax Toggle Server-side (#7.3)**: `Setting.tax_config = {enabled, percent}`. `create_sale` recomputes tax authoritatively (client tax IGNORED). POS UI hides PPN line when disabled.
+- [x] **Leading Zero Bug Fix (#8.1)**: Global `numOnFocus` helper applied via regex to all 15 `<input type="number">` — typing "2" in a "0" field yields "2" not "02".
+- [x] **Multi-Outlet Consolidated (#1)**: outlet_scope() accepts "all" → returns None (no filter). Header outlet switcher offers "🏢 Semua Outlet (Konsolidasi)" for Super Admin/Admin, plus "+ Tambah Outlet Baru…" shortcut. Kasir/Vendor forced to own outlet_id (RBAC).
+- [x] **Enterprise Dashboard (#2)**: Complete overhaul with Recharts:
+  - 4 KPI cards (Penjualan, Transaksi/Basket, Laba Bersih/Margin, Pengeluaran) with growth badges & tabular numbers
+  - Sales Trend (AreaChart) with **Jam / Harian** dual-mode toggle
+  - Payment Method donut (PieChart, 30 days)
+  - Low Stock red-bordered panel + Top 5 Products progress bars + Quick Actions
+  - Outlet Comparison BarChart (shown when "Semua Outlet" active)
+  - Backend: `/api/dashboard/analytics?mode=daily|hourly&outlet_id=` returns kpi/trend/payment_breakdown/top_products/low_stock/outlet_compare
+- [x] **Global Ops Status Bar**: "POS: Online · Shift: Active (Budi)" indicator in top header with pulsing green dot
+
 ## Testing status
 - **iter10**: 25/25 backend tests PASSED
-- **iter11**: 15/15 backend tests PASSED (variants, white-label, branding, subscription, feature toggles) + iter10 regression 25/25 sequential
-- **Frontend**: Verified via screenshot — Variant Editor, Kelola Varian Modal, White-Label Modal (all sections), Feature Toggle Matrix (Per Role / Per Outlet), Sidebar Collapse, POS Variant Picker with notes
+- **iter11**: 15/15 backend tests PASSED
+- **iter12**: 9/9 backend tests PASSED (PPN server-side enforcement, dashboard analytics both modes, outlet scope 'all', Kasir RBAC)
+- **Regression**: 49/49 total when run sequentially
+- **Frontend**: verified via screenshot — dashboard KPI + Area/Donut/Bar charts, PPN toggle real-time preview, outlet switcher "Semua Outlet" mode
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.
