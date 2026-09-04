@@ -130,6 +130,7 @@ class SelfOrderInput(BaseModel):
     payment_method: str = ""
     payment_proof: str = ""
     customer_name: str = ""
+    customer_phone: str = ""
     outlet_id: str = "outlet-sudirman"
 
 
@@ -957,6 +958,65 @@ async def dashboard_summary(
     }
 
 
+@api_router.get("/notifications")
+async def get_notifications(
+    outlet_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(current_user),
+):
+    """Aggregate real-time alerts: low stock, recent shift events, pending self-orders."""
+    scope = outlet_scope(user, outlet_id)
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=24)
+    items = []
+    # Low stock
+    ls_stmt = select(M.Product).where(M.Product.stock <= 5)
+    if scope: ls_stmt = ls_stmt.where(M.Product.outlet_id == scope)
+    ls = (await db.execute(ls_stmt.order_by(M.Product.stock).limit(10))).scalars().all()
+    for p in ls:
+        items.append({
+            "id": f"stock:{p.id}",
+            "type": "stock",
+            "severity": "critical" if p.stock == 0 else "warning",
+            "title": f"Stok {p.name} tersisa {int(p.stock or 0)}",
+            "detail": f"Outlet {p.outlet_id.replace('outlet-', '').title()} · minimum 5 porsi",
+            "created_at": now.isoformat(),
+            "action": "inventory",
+        })
+    # Recent shift events (closed shifts last 24h)
+    sh_stmt = select(M.Shift).where(M.Shift.closed_at.isnot(None), M.Shift.closed_at >= since)
+    if scope: sh_stmt = sh_stmt.where(M.Shift.outlet_id == scope)
+    shifts = (await db.execute(sh_stmt.order_by(M.Shift.closed_at.desc()).limit(5))).scalars().all()
+    for s in shifts:
+        variance = (s.closing_cash or 0) - ((s.opening_cash or 0) + (s.expected_cash or 0))
+        items.append({
+            "id": f"shift:{s.id}",
+            "type": "shift",
+            "severity": "info" if abs(variance) < 10000 else "warning",
+            "title": f"Kasir {s.cashier_name or 'Kasir'} melakukan Closing",
+            "detail": f"Selisih: {'Rp ' + f'{variance:,.0f}'.replace(',', '.') if variance else 'Rp 0'} · {s.outlet_id.replace('outlet-', '').title()}",
+            "created_at": s.closed_at.isoformat() if s.closed_at else now.isoformat(),
+            "action": "cashiers",
+        })
+    # Pending self-orders (last 24h, not yet accepted)
+    so_stmt = select(M.SelfOrder).where(M.SelfOrder.status.in_(["pending", "Pesanan Diterima"]), M.SelfOrder.created_at >= since)
+    if scope: so_stmt = so_stmt.where(M.SelfOrder.outlet_id == scope)
+    orders = (await db.execute(so_stmt.order_by(M.SelfOrder.created_at.desc()).limit(10))).scalars().all()
+    for o in orders:
+        items.append({
+            "id": f"order:{o.id}",
+            "type": "order",
+            "severity": "info",
+            "title": f"Pesanan Baru #{str(o.id)[:8].upper()} dari QR {o.table_no}",
+            "detail": f"{o.customer_name or 'Pelanggan'} · Rp {(o.total or 0):,.0f}".replace(",", "."),
+            "created_at": o.created_at.isoformat() if o.created_at else now.isoformat(),
+            "action": "pos",
+        })
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    items = items[:10]
+    return {"items": items, "unread_count": len(items)}
+
+
 @api_router.get("/dashboard/analytics")
 async def dashboard_analytics(
     outlet_id: Optional[str] = None,
@@ -1104,6 +1164,7 @@ async def create_self_order(payload: SelfOrderInput, db: AsyncSession = Depends(
         table_no=payload.table,
         outlet_id=payload.outlet_id,
         customer_name=payload.customer_name,
+        customer_phone=payload.customer_phone,
         total=payload.total,
         notes=payload.notes,
         lines=[ln.model_dump() for ln in payload.lines],
@@ -1154,7 +1215,7 @@ async def accept_self_order(
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
-    if order.status not in ("Menunggu kasir", "Menunggu konfirmasi"):
+    if order.status not in ("Menunggu kasir", "Menunggu konfirmasi", "Pesanan Diterima"):
         raise HTTPException(status_code=400, detail=f"Pesanan sudah {order.status}")
 
     shift_id = None
@@ -1854,6 +1915,7 @@ async def bootstrap():
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS features_enabled JSONB DEFAULT '{}'::jsonb",
             "CREATE INDEX IF NOT EXISTS ix_sales_outlet ON mjd_sales(outlet_id)",
+            "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(32) DEFAULT ''",
             "UPDATE mjd_self_orders SET status='Pesanan Diterima' WHERE status='Menunggu kasir'",
             "UPDATE mjd_users SET role='Admin' WHERE role='Merchant Admin'",
             "UPDATE mjd_users SET merchant_id='m-barista' WHERE role='Vendor' AND (merchant_id IS NULL OR merchant_id='')",

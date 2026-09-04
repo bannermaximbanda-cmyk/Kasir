@@ -139,6 +139,7 @@ class SelfOrder(Base):
     table_no = Column(String(32), default="Meja 01")
     outlet_id = Column(String(36), index=True, default="outlet-sudirman")
     customer_name = Column(String(120), default="")
+    customer_phone = Column(String(32), default="")
     total = Column(Float, default=0.0)
     notes = Column(Text, default="")
     status = Column(String(32), default="Pesanan Diterima", index=True)

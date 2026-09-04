@@ -7,7 +7,7 @@ import {
   Printer, QrCode, Receipt, Search, Settings2, ShoppingCart, Store, Timer,
   Trash2, Users, Wallet, X, Building2, Volume2, MessageCircle, PlayCircle,
   StopCircle, UserCheck, Upload, Image as ImageIcon, Check, Copy, Shield,
-  Eye, EyeOff, RefreshCw, Bluetooth,
+  Eye, EyeOff, RefreshCw, Bluetooth, MapPin, Star, ChevronRight, Link as LinkIcon, Info,
 } from "lucide-react";
 import { pairPrinter, directPrint, isPrinterConnected, pairedPrinterName, isPrinterSupported, buildSaleReceipt, buildShiftReport, buildKitchenTicket } from "@/utils/thermalPrinter";
 import { queueSale, drainQueue, queuedCount } from "@/utils/offlineQueue";
@@ -25,10 +25,10 @@ axios.defaults.withCredentials = true;
 axios.defaults.headers.common["X-Requested-With"] = "mjd-kupi";
 
 const NAV_BY_ROLE = {
-  "Super Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "users", "settings"],
-  "Admin": ["overview", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "vendor-center"],
+  "Super Admin": ["overview", "pos", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "self-service", "vendor-center", "users", "printer", "settings"],
+  "Admin": ["overview", "kds", "inventory", "expenses", "products", "merchants", "cashiers", "reports", "tables", "vendor-center", "printer"],
   Vendor: ["kds", "vendor-center", "self-service"],
-  Kasir: ["pos", "expenses", "kds"],
+  Kasir: ["pos", "expenses", "kds", "printer"],
 };
 const NAV_ITEMS = [
   { id: "overview", label: "Ringkasan", icon: BarChart3 },
@@ -44,6 +44,7 @@ const NAV_ITEMS = [
   { id: "self-service", label: "Self-Service", icon: QrCode },
   { id: "vendor-center", label: "Pusat Vendor", icon: Users },
   { id: "users", label: "User & Security", icon: Shield },
+  { id: "printer", label: "Pengaturan Printer", icon: Printer },
   { id: "settings", label: "Pengaturan Sistem", icon: Settings2 },
 ];
 
@@ -72,6 +73,8 @@ function AdminApp() {
   const [branding, setBranding] = useState({ name: "MJD Kupi", theme_color: "#f97316", logo_url: "", banner_url: "" });
   const [featureMatrix, setFeatureMatrix] = useState({}); // { "role:Kasir": {pos:true, kds:false}, "outlet:x": {...} }
   const [taxConfig, setTaxConfig] = useState({ enabled: false, percent: 0 });
+  const [notifications, setNotifications] = useState({ items: [], unread_count: 0 });
+  const [showNotif, setShowNotif] = useState(false);
   const [expenses, setExpenses] = useState([]);
   const [shift, setShift] = useState(null);
   const [showShiftOpen, setShowShiftOpen] = useState(false);
@@ -144,6 +147,11 @@ function AdminApp() {
     axios.get(`${API}/settings/tax_config`).then(({ data }) => {
       if (data && typeof data === "object") setTaxConfig({ enabled: !!data.enabled, percent: Number(data.percent || 0) });
     }).catch(() => {});
+    // Notifications polling every 15s
+    const loadNotif = () => axios.get(`${API}/notifications`, { params: { outlet_id: activeOutlet !== "all" ? activeOutlet : undefined } }).then(({ data }) => setNotifications(data)).catch(() => {});
+    loadNotif();
+    const notifTimer = setInterval(loadNotif, 15000);
+    return () => clearInterval(notifTimer);
     if (session.role === "Kasir") reloadShift();
     // Setup WebAudio chime
     chimeRef.current = () => {
@@ -320,7 +328,10 @@ function AdminApp() {
             </div>
             <div className="role-chip" data-testid="current-user-role">{session.name} · {session.role}</div>
             {(!online || offlineQueued > 0) && <div className="offline-chip" data-testid="offline-chip">{!online ? "🔌 OFFLINE" : `⏳ ${offlineQueued} pending`}</div>}
-            <button className="icon-button" data-testid="notifications-button" onClick={() => notify("Tidak ada notifikasi baru")}><Bell size={18} /><i /></button>
+            <button className="icon-button notif-btn" data-testid="notifications-button" onClick={() => setShowNotif(true)}>
+              <Bell size={18} />
+              {notifications.unread_count > 0 && <span className="notif-badge" data-testid="notif-badge">{notifications.unread_count}</span>}
+            </button>
             <div className="top-avatar">{session.name.slice(0, 2).toUpperCase()}</div>
           </div>
         </header>
@@ -342,11 +353,13 @@ function AdminApp() {
           {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} />}
           {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} />}
           {page === "reports" && <Reports products={products} expenses={expenses} />}
-          {page === "tables" && <Tables notify={notify} />}
+          {page === "tables" && <Tables notify={notify} activeOutlet={activeOutlet} branding={branding} />}
           {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} />}
           {page === "vendor-center" && <VendorCenter notify={notify} />}
           {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} role={session.role} />}
+          {page === "printer" && <PrinterSettings notify={notify} />}
         </div>
+        {showNotif && <NotificationDrawer notif={notifications} onClose={() => setShowNotif(false)} setPage={(p) => { setShowNotif(false); setPage(p); }} onMarkAll={() => setNotifications({ ...notifications, unread_count: 0 })} />}
       </main>
 
       {toast && <div className="toast" data-testid="toast-message"><span>✓</span>{toast}</div>}
@@ -1190,35 +1203,64 @@ function Reports({ products, expenses }) {
 }
 
 // -------- Tables (QR) --------
-function Tables({ notify }) {
+function Tables({ notify, activeOutlet, branding }) {
   const [count, setCount] = useState(12);
-  const [selected, setSelected] = useState(null);
+  const [baseUrl, setBaseUrl] = useState(() => {
+    try { return localStorage.getItem("mjd_qr_base_url") || ORIGIN; } catch { return ORIGIN; }
+  });
+  const [storeId, setStoreId] = useState(() => {
+    try { return localStorage.getItem("mjd_qr_store_id") || (branding?.slug || ""); } catch { return ""; }
+  });
+  useEffect(() => { try { localStorage.setItem("mjd_qr_base_url", baseUrl); } catch {} }, [baseUrl]);
+  useEffect(() => { try { localStorage.setItem("mjd_qr_store_id", storeId); } catch {} }, [storeId]);
   const meja = Array.from({ length: count }, (_, i) => String(i + 1).padStart(2, "0"));
-  const linkFor = (t) => `${ORIGIN}/self-order?table=${t}`;
-  const printOne = (t) => { setSelected(t); setTimeout(() => window.print(), 200); };
+  const outletId = activeOutlet && activeOutlet !== "all" ? activeOutlet : "outlet-sudirman";
+  const linkFor = (t) => {
+    const parts = [`table=${t}`, `outlet_id=${outletId}`];
+    if (storeId) parts.unshift(`store_id=${storeId}`);
+    return `${baseUrl}/self-order?${parts.join("&")}`;
+  };
+  const printAll = () => { document.body.classList.add("print-all-mode"); setTimeout(() => { window.print(); document.body.classList.remove("print-all-mode"); }, 300); };
   return <>
-    <SectionHeader eyebrow="SELF-ORDER STUDIO" title="QR meja pelanggan" description="Generate QR asli yang bisa di-scan kamera HP. Setiap kartu meja unik dan siap cetak."
+    <SectionHeader eyebrow="SELF-ORDER STUDIO" title="QR meja pelanggan" description="Generate QR unik per meja dengan Base URL & Store ID kustom. Auto-render, siap cetak PDF."
       action={<div className="row-gap">
         <label className="mini-num">Jumlah meja<input type="number" value={count} min={1} max={100} onChange={(e) => setCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} onFocus={numOnFocus} data-testid="tables-count-input" /></label>
-        <button className="primary-btn" data-testid="generate-qr-button" onClick={() => notify(`QR ${count} meja siap`)}><Plus size={16} /> Generate</button>
+        <button className="outline-btn" onClick={printAll} data-testid="print-all-qr-button"><Printer size={14}/> Cetak Semua QR (PDF)</button>
+        <button className="primary-btn" data-testid="generate-qr-button" onClick={() => notify(`QR ${count} meja siap cetak`)}><Plus size={16} /> Generate</button>
       </div>} />
-    <div className="table-grid-v2">
-      {meja.map((t) => <div className="table-card-v2" key={t} data-testid={`table-card-${t}`}>
-        <div className="table-qr-real"><QRCodeSVG value={linkFor(t)} size={90} level="M" includeMargin={true} /></div>
-        <div className="table-card-info"><b>Meja {t}</b><span className="mono">{linkFor(t).replace(/^https?:\/\//, "")}</span></div>
-        <div className="table-card-actions">
+    {/* Configuration form */}
+    <div className="qr-config panel" data-testid="qr-config">
+      <div className="form-heading"><div className="form-icon"><LinkIcon size={18}/></div>
+        <div><h2>Konfigurasi URL QR</h2><span>Base URL dinamis — perubahan otomatis render ulang semua QR di bawah.</span></div>
+      </div>
+      <div className="qr-config-grid">
+        <label>Domain / Base URL Order
+          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value.trim().replace(/\/$/, ""))} placeholder="https://mjdkupi.com" data-testid="qr-base-url-input"/>
+        </label>
+        <label>Store ID / Slug (opsional)
+          <input value={storeId} onChange={(e) => setStoreId(e.target.value.trim())} placeholder="mjdkupi-jakarta" data-testid="qr-store-id-input"/>
+        </label>
+        <label>Outlet Target
+          <input value={outletId} disabled/>
+        </label>
+      </div>
+      <div className="qr-preview-url"><b>Preview URL:</b> <span className="mono">{linkFor("05")}</span></div>
+    </div>
+    <div className="table-grid-v2 qr-cards-print">
+      {meja.map((t) => <div className="table-card-v2 qr-print-card" key={t} data-testid={`table-card-${t}`}>
+        <div className="qr-print-brand">
+          {branding?.logo_url ? <img src={branding.logo_url} alt="" className="qr-brand-logo"/> : <Coffee size={22}/>}
+          <b>{branding?.name || "MJD Kupi"}</b>
+        </div>
+        <div className="table-qr-real"><QRCodeSVG value={linkFor(t)} size={140} level="H" includeMargin={true} /></div>
+        <strong className="qr-table-no">MEJA {t}</strong>
+        <span className="qr-cta">Scan QR untuk Pilih Menu & Pesan</span>
+        <div className="table-card-actions no-print">
           <button className="small-action" onClick={() => { navigator.clipboard?.writeText(linkFor(t)); notify(`Link Meja ${t} disalin`); }} data-testid={`copy-table-${t}`}><Copy size={12} /> Salin</button>
-          <button className="small-action" data-testid={`print-table-${t}`} onClick={() => printOne(t)}><Printer size={12} /> Cetak</button>
+          <button className="small-action" data-testid={`print-table-${t}`} onClick={() => { document.body.classList.add("print-single-mode"); document.body.setAttribute("data-print-table", t); setTimeout(() => { window.print(); document.body.classList.remove("print-single-mode"); document.body.removeAttribute("data-print-table"); }, 300); }}><Printer size={12} /> Cetak</button>
         </div>
       </div>)}
     </div>
-    {selected && <div className="print-sheet" data-testid="print-sheet"><div className="print-sticker">
-      <div className="brand-mark"><Coffee size={22}/></div>
-      <h2>MJD Kupi</h2>
-      <QRCodeSVG value={linkFor(selected)} size={220} level="H" includeMargin={true} />
-      <strong>Meja {selected}</strong>
-      <span>Scan QR untuk memesan menu tanpa antre</span>
-    </div></div>}
   </>;
 }
 
@@ -1824,29 +1866,48 @@ function CashierMonitor({ notify, onView }) {
 function CustomerSelfOrder() {
   const params = new URLSearchParams(window.location.search);
   const tableParam = params.get("table") || "01";
-  const outletId = params.get("outlet") || "outlet-sudirman";
+  const outletId = params.get("outlet_id") || params.get("outlet") || "outlet-sudirman";
+  const storeSlug = params.get("store_id") || "";
   const [products, setProducts] = useState([]);
+  const [merchants, setMerchants] = useState([]);
   const [cart, setCart] = useState([]);
   const [step, setStep] = useState("menu"); // menu | pay | done | closed
-  const [payMethod, setPayMethod] = useState("QRIS");
+  const [payMethod, setPayMethod] = useState("QRIS Toko");
   const [proof, setProof] = useState("");
   const [qrisImg, setQrisImg] = useState("");
   const [banks, setBanks] = useState([]);
   const [customerName, setCustomerName] = useState("");
+  const [customerPhone, setCustomerPhone] = useState("");
   const [orderId, setOrderId] = useState("");
   const [status, setStatus] = useState("Pesanan Diterima");
   const [shopOpen, setShopOpen] = useState(true);
   const [shopMsg, setShopMsg] = useState("");
-  const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
+  const [branding, setBranding] = useState({ name: "MJD Kupi", theme_color: "#f97316", logo_url: "", banner_url: "" });
+  const [taxConfig, setTaxConfig] = useState({ enabled: false, percent: 0 });
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("Semua");
+  const [variantPick, setVariantPick] = useState(null);
+  const [showCheckout, setShowCheckout] = useState(false);
+
+  const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
+  const tax = taxConfig.enabled && taxConfig.percent > 0 ? Math.round(subtotal * (taxConfig.percent / 100)) : 0;
+  const total = subtotal + tax;
+
   useEffect(() => {
     axios.get(`${API}/outlets/${outletId}/shift-status`).then(({ data }) => {
       setShopOpen(!!data.open);
       if (!data.open) setShopMsg("Mohon Maaf, Toko Sedang Tutup / Belum Menerima Pesanan Online");
     }).catch(() => {});
     axios.get(`${API}/products?outlet_id=${outletId}`).then(({ data }) => setProducts(data)).catch(() => {});
+    axios.get(`${API}/merchants`).then(({ data }) => setMerchants(data)).catch(() => {});
     axios.get(`${API}/settings/qris-image:${outletId}`).then(({ data }) => setQrisImg(data?.image || "")).catch(() => {});
     axios.get(`${API}/settings/bank-accounts?outlet_id=${outletId}`).then(({ data }) => setBanks(data?.accounts || [])).catch(() => {});
-  }, [outletId]);
+    axios.get(`${API}/settings/tax_config`).then(({ data }) => setTaxConfig({ enabled: !!data?.enabled, percent: Number(data?.percent || 0) })).catch(() => {});
+    if (storeSlug) axios.get(`${API}/branding/by-slug/${storeSlug}`).then(({ data }) => {
+      setBranding(data);
+      try { document.documentElement.style.setProperty("--brand-accent", data.theme_color || "#f97316"); } catch {}
+    }).catch(() => {});
+  }, [outletId, storeSlug]);
   useEffect(() => {
     if (step !== "done" || !orderId) return;
     const t = setInterval(async () => {
@@ -1854,97 +1915,220 @@ function CustomerSelfOrder() {
     }, 4000);
     return () => clearInterval(t);
   }, [step, orderId]);
-  const add = (p) => setCart((cur) => cur.find((i) => i.id === p.id) ? cur.map((i) => i.id === p.id ? { ...i, qty: i.qty + 1 } : i) : [...cur, { ...p, qty: 1 }]);
-  const dec = (id) => setCart((cur) => cur.map((i) => i.id === id ? { ...i, qty: i.qty - 1 } : i).filter((i) => i.qty > 0));
+
+  const handleProductClick = (p) => {
+    const active = (p.variants || []).filter((v) => v.active !== false);
+    if (active.length > 0) setVariantPick(p);
+    else addToCart(p);
+  };
+  const addToCart = (p, variant = null, notes = "") => setCart((cur) => {
+    const key = variant ? `${p.id}__${variant.id}` : p.id;
+    const found = cur.find((i) => i.key === key && i.notes === notes);
+    if (found) return cur.map((i) => i === found ? { ...i, qty: i.qty + 1 } : i);
+    return [...cur, { key, id: p.id, name: p.name, vendor: p.vendor, merchant_id: p.merchant_id, color: p.color, image_url: p.image_url, variant_id: variant?.id || null, variant_name: variant?.name || "", notes: notes || "", price: variant ? Number(variant.price) : Number(p.price), qty: 1 }];
+  });
+  const adjust = (key, delta) => setCart((cur) => cur.map((i) => i.key === key ? { ...i, qty: i.qty + delta } : i).filter((i) => i.qty > 0));
   const handleFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setProof(r.result); r.readAsDataURL(f); };
   const sendOrder = async () => {
     if (!customerName.trim()) { alert("Nama pelanggan wajib diisi"); return; }
+    if (!customerPhone.trim() || customerPhone.length < 8) { alert("Nomor WhatsApp wajib diisi (min 8 digit)"); return; }
     try {
       const { data } = await axios.post(`${API}/self-order`, {
         table: `Meja ${tableParam}`,
         outlet_id: outletId,
         customer_name: customerName.trim(),
-        lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id })),
+        customer_phone: customerPhone.trim(),
+        lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id, variant_id: i.variant_id || null, variant_name: i.variant_name || "", notes: i.notes || "" })),
         total, notes: "Self-service QR",
         payment_method: payMethod, payment_proof: proof,
       });
-      setOrderId(data.id);
-      setStatus(data.status || "Pesanan Diterima");
-      setStep("done");
+      setOrderId(data.id); setStatus(data.status || "Pesanan Diterima"); setStep("done"); setShowCheckout(false);
     } catch (e) {
       if (e.response?.status === 423) setStep("closed");
       else alert(e.response?.data?.detail || "Gagal mengirim pesanan");
     }
   };
-  if (!shopOpen) return <div className="customer-app" data-testid="customer-self-order">
-    <header className="customer-topbar"><div className="brand-mark"><Coffee size={18}/></div><div><strong>MJD Kupi</strong><span>Meja {tableParam}</span></div></header>
-    <div className="customer-done" data-testid="customer-closed">
-      <div className="brand-mark big" style={{ background: "#ef4444" }}><StopCircle size={30} /></div>
+
+  // Categories
+  const cats = ["Semua", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean)))];
+  const filtered = products.filter((p) => (category === "Semua" || p.category === category) && (!query || p.name.toLowerCase().includes(query.toLowerCase())));
+  const itemCount = cart.reduce((a, i) => a + i.qty, 0);
+
+  if (!shopOpen) return <div className="csa" data-testid="customer-self-order">
+    <div className="csa-topbar"><div className="csa-logo">{branding.logo_url ? <img src={branding.logo_url} alt=""/> : <Coffee size={20}/>}</div><b>{branding.name}</b></div>
+    <div className="csa-closed" data-testid="customer-closed">
+      <StopCircle size={54} color="#ef4444"/>
       <h2>Toko Sedang Tutup</h2>
       <p>{shopMsg}</p>
       <span>Silakan datang kembali saat kasir sudah membuka shift.</span>
     </div>
   </div>;
-  const trackerSteps = ["Pesanan Diterima", "Diproses", "Siap diambil", "Selesai"];
-  const trackerIdx = trackerSteps.indexOf(status);
-  return <div className="customer-app" data-testid="customer-self-order">
-    <header className="customer-topbar">
-      <div className="brand-mark"><Coffee size={18}/></div>
-      <div><strong>MJD Kupi</strong><span>Meja {tableParam}</span></div>
-    </header>
-    {step === "menu" && <>
-      <div className="customer-grid">
-        {products.map((p) => <button key={p.id} className="customer-product" onClick={() => add(p)} data-testid={`customer-product-${p.id}`}>
-          <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={26} />}</div>
-          <b>{p.name}</b><span>{p.vendor}</span><strong>{money(p.price)}</strong>
+
+  if (step === "done") {
+    const trackerSteps = [
+      { key: "Pesanan Diterima", icon: Check, label: "Pesanan Diterima" },
+      { key: "Diproses", icon: Coffee, label: "Sedang Dibuat Dapur" },
+      { key: "Siap diambil", icon: Package, label: "Pesanan Siap" },
+      { key: "Selesai", icon: Star, label: "Selesai" },
+    ];
+    const idx = trackerSteps.findIndex((s) => s.key === status);
+    return <div className="csa" data-testid="customer-self-order">
+      <div className="csa-topbar tracking">
+        <div className="csa-logo">{branding.logo_url ? <img src={branding.logo_url} alt=""/> : <Coffee size={20}/>}</div>
+        <div><b>{branding.name}</b><span>Meja {tableParam}</span></div>
+      </div>
+      <div className="csa-track" data-testid="customer-done">
+        <div className="csa-track-head">
+          <div className="brand-mark big" style={{ background: branding.theme_color }}><Check size={30}/></div>
+          <h1>Pesanan terkirim!</h1>
+          <p><b>{customerName}</b> · Meja {tableParam}</p>
+          <span className="csa-order-id">#{String(orderId).slice(0, 8).toUpperCase()}</span>
+        </div>
+        <div className="csa-stepper" data-testid="order-tracker">
+          {trackerSteps.map((s, i) => {
+            const done = idx >= i, current = idx === i;
+            return <div key={s.key} className={`csa-step ${done ? "done" : ""} ${current ? "current" : ""}`}>
+              <div className="csa-step-icon"><s.icon size={16}/></div>
+              <div className="csa-step-body"><b>{s.label}</b>{current && <em data-testid="live-status">Sedang berlangsung…</em>}</div>
+              {i < trackerSteps.length - 1 && <div className="csa-step-line"/>}
+            </div>;
+          })}
+        </div>
+        <div className="csa-summary">
+          <b>Rincian Pesanan</b>
+          {cart.map((i) => <div key={i.key} className="csa-summary-row"><span>{i.qty}× {i.name}{i.variant_name && ` (${i.variant_name})`}</span><strong>{money(i.price * i.qty)}</strong></div>)}
+          {tax > 0 && <div className="csa-summary-row"><span>PPN ({taxConfig.percent}%)</span><strong>{money(tax)}</strong></div>}
+          <div className="csa-summary-row total"><span>Total dibayar</span><strong>{money(total)}</strong></div>
+        </div>
+      </div>
+    </div>;
+  }
+
+  return <div className="csa" data-testid="customer-self-order">
+    {/* Hero header with banner */}
+    <div className="csa-hero" style={{ backgroundImage: branding.banner_url ? `url(${branding.banner_url})` : "linear-gradient(135deg, var(--brand-accent) 0%, #fb923c 100%)" }}>
+      <div className="csa-hero-overlay">
+        <div className="csa-hero-badge">
+          <div className="csa-logo big">{branding.logo_url ? <img src={branding.logo_url} alt=""/> : <Coffee size={26}/>}</div>
+          <div>
+            <h1>{branding.name}</h1>
+            <span><MapPin size={11}/> Meja {tableParam} · <i className="live-dot"/> Buka - Menerima Pesanan</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    {/* Sticky search + categories */}
+    <div className="csa-sticky">
+      <div className="csa-search">
+        <Search size={16}/>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cari menu favoritmu…" data-testid="csa-search-input"/>
+      </div>
+      <div className="csa-cats">
+        {cats.map((c) => <button key={c} className={category === c ? "active" : ""} onClick={() => setCategory(c)} data-testid={`csa-cat-${c.toLowerCase()}`}>{c}</button>)}
+      </div>
+    </div>
+    {/* Product list */}
+    <div className="csa-list">
+      {filtered.map((p) => {
+        const priceLabel = (p.variants||[]).filter(v=>v.active!==false).length > 0 ? `Mulai ${money(Math.min(...p.variants.filter(v=>v.active!==false).map(v=>v.price)))}` : money(p.price);
+        return <div key={p.id} className="csa-item" data-testid={`csa-item-${p.id}`}>
+          <div className="csa-item-img" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name}/> : <Coffee size={30}/>}</div>
+          <div className="csa-item-info">
+            <b>{p.name}</b>
+            <span className="csa-vendor">by {p.vendor}</span>
+            <div className="csa-item-foot">
+              <strong>{priceLabel}</strong>
+              <button className="csa-add-btn" onClick={() => handleProductClick(p)} data-testid={`csa-add-${p.id}`}><Plus size={14}/> Tambah</button>
+            </div>
+          </div>
+        </div>;
+      })}
+      {filtered.length === 0 && <div className="csa-empty">Tidak ada menu yang cocok.</div>}
+    </div>
+    {/* Floating bottom cart */}
+    {itemCount > 0 && <div className="csa-float" data-testid="customer-cart-bar">
+      <div><b>{itemCount} Item</b><span>{money(total)}</span></div>
+      <button onClick={() => setShowCheckout(true)} data-testid="customer-checkout-button">Lanjut ke Pembayaran <ChevronRight size={14}/></button>
+    </div>}
+    {/* Variant modal */}
+    {variantPick && <CsaVariantModal product={variantPick} onClose={() => setVariantPick(null)} onAdd={(v, n) => { addToCart(variantPick, v, n); setVariantPick(null); }} />}
+    {/* Checkout drawer */}
+    {showCheckout && <div className="csa-drawer-back" onClick={() => setShowCheckout(false)}>
+      <div className="csa-drawer" onClick={(e) => e.stopPropagation()} data-testid="customer-checkout-drawer">
+        <div className="csa-drawer-grabber"/>
+        <button className="csa-drawer-close" onClick={() => setShowCheckout(false)}><X size={20}/></button>
+        <h2>Checkout Pesanan</h2>
+        <label className="csa-label">Nama Lengkap <em>*</em></label>
+        <input className="csa-input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Contoh: Budi Santoso" data-testid="customer-name-input"/>
+        <label className="csa-label">Nomor WhatsApp <em>*</em></label>
+        <input className="csa-input" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value.replace(/[^0-9]/g, ""))} placeholder="628xx" data-testid="customer-phone-input" type="tel"/>
+        <b className="csa-section-title">Rincian Pesanan</b>
+        <div className="csa-drawer-lines">
+          {cart.map((i) => <div key={i.key} className="csa-drawer-line">
+            <div className="csa-drawer-info">
+              <b>{i.name}{i.variant_name && <em className="var-chip"> {i.variant_name}</em>}</b>
+              {i.notes && <span className="csa-note">📝 {i.notes}</span>}
+              <span>{money(i.price)} × {i.qty}</span>
+            </div>
+            <div className="csa-drawer-qty">
+              <button onClick={() => adjust(i.key, -1)} data-testid={`csa-dec-${i.key}`}>−</button>
+              <strong>{i.qty}</strong>
+              <button onClick={() => adjust(i.key, 1)} data-testid={`csa-inc-${i.key}`}>+</button>
+            </div>
+            <strong className="csa-drawer-sub">{money(i.price * i.qty)}</strong>
+          </div>)}
+        </div>
+        <div className="csa-drawer-totals">
+          <div><span>Subtotal</span><b>{money(subtotal)}</b></div>
+          {tax > 0 && <div><span>PPN ({taxConfig.percent}%)</span><b>{money(tax)}</b></div>}
+          <div className="grand"><span>Total</span><strong>{money(total)}</strong></div>
+        </div>
+        <b className="csa-section-title">Metode Pembayaran</b>
+        <div className="csa-methods">
+          {[["QRIS Toko", QrCode], ["Transfer Bank", CreditCard], ["Bayar di Kasir", DollarSign]].map(([m, Ic]) => (
+            <button key={m} className={payMethod === m ? "active" : ""} onClick={() => setPayMethod(m)} data-testid={`customer-method-${m.toLowerCase().replaceAll(" ", "-")}`}><Ic size={15}/><span>{m}</span></button>
+          ))}
+        </div>
+        {payMethod === "QRIS Toko" && <div className="csa-qris" data-testid="customer-qris-image">
+          {qrisImg ? <img src={qrisImg} alt="QRIS Toko"/> : <QRCodeSVG value={`MJDKUPI|OUTLET:${outletId}|AMOUNT:${total}`} size={200} level="M" includeMargin={true}/>}
+          <span>Scan QRIS di atas untuk membayar Rp {total.toLocaleString("id-ID")}</span>
+        </div>}
+        {payMethod === "Transfer Bank" && <div className="csa-banks" data-testid="customer-banks">
+          {banks.length ? banks.map((b) => <div className="bank-line" key={b.id}><b>{b.bank_name}</b><span className="mono">{b.account_number}</span><small>a.n. {b.holder_name}</small></div>) : <div className="hint">Belum ada rekening bank terdaftar</div>}
+        </div>}
+        {payMethod !== "Bayar di Kasir" && <>
+          <label className="csa-label">Upload Bukti Pembayaran</label>
+          <input type="file" accept="image/*" onChange={handleFile} data-testid="customer-proof-input" className="csa-input"/>
+          {proof && <div className="proof-thumb"><img src={proof} alt="bukti"/><Check size={16} color="#059669"/></div>}
+        </>}
+        <button className="csa-submit" onClick={sendOrder} data-testid="customer-send-order">Kirim Pesanan · {money(total)}</button>
+      </div>
+    </div>}
+  </div>;
+}
+
+function CsaVariantModal({ product, onClose, onAdd }) {
+  const active = (product.variants || []).filter((v) => v.active !== false);
+  const [pick, setPick] = useState(active[0]);
+  const [notes, setNotes] = useState("");
+  return <div className="csa-drawer-back" onClick={onClose}>
+    <div className="csa-drawer variant" onClick={(e) => e.stopPropagation()} data-testid="csa-variant-modal">
+      <div className="csa-drawer-grabber"/>
+      <button className="csa-drawer-close" onClick={onClose}><X size={20}/></button>
+      <div className="csa-var-head">
+        <div className="csa-var-img" style={{ background: product.color }}>{product.image_url ? <img src={product.image_url} alt=""/> : <Coffee size={30}/>}</div>
+        <div><h2>{product.name}</h2><span>by {product.vendor}</span></div>
+      </div>
+      <b className="csa-section-title">Pilih Varian</b>
+      <div className="csa-var-picks">
+        {active.map((v) => <button key={v.id} className={pick?.id === v.id ? "active" : ""} onClick={() => setPick(v)} data-testid={`csa-pick-${v.id}`}>
+          <span><b>{v.name}</b></span><strong>{money(v.price)}</strong>
         </button>)}
       </div>
-      {cart.length > 0 && <div className="customer-cart" data-testid="customer-cart-bar">
-        <div><b>{cart.reduce((a, i) => a + i.qty, 0)} item</b><span>{money(total)}</span></div>
-        <button className="primary-btn" onClick={() => setStep("pay")} data-testid="customer-checkout-button">Checkout <span>→</span></button>
-      </div>}
-    </>}
-    {step === "pay" && <div className="customer-pay">
-      <h2>Konfirmasi & bayar</h2>
-      <label className="customer-label">Nama Pelanggan <em style={{ color: "#ef4444" }}>*</em></label>
-      <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Nama Anda" data-testid="customer-name-input" className="customer-input" />
-      <div className="customer-lines">{cart.map((i) => <div key={i.id} className="customer-line">
-        <div><b>{i.name}</b><span>{money(i.price)}</span></div>
-        <div className="qty"><button onClick={() => dec(i.id)}>−</button><strong>{i.qty}</strong><button onClick={() => add(i)}>+</button></div>
-      </div>)}</div>
-      <div className="customer-total"><span>Total</span><strong>{money(total)}</strong></div>
-      <div className="pay-tabs">
-        {[["Tunai", DollarSign], ["QRIS Toko", QrCode], ["Transfer Bank", CreditCard]].map(([m, Icon]) => (
-          <button key={m} className={payMethod === m ? "active" : ""} onClick={() => setPayMethod(m)} data-testid={`customer-method-${m.toLowerCase().replaceAll(" ", "-")}`}><Icon size={16} />{m}</button>
-        ))}
-      </div>
-      {payMethod === "QRIS Toko" && <div className="qris-real" data-testid="customer-qris-image">{qrisImg ? <img src={qrisImg} alt="QRIS Toko" style={{ width: 220, height: 220, objectFit: "contain" }} /> : <QRCodeSVG value={`MJDKUPI|OUTLET:${outletId}|AMOUNT:${total}`} size={200} level="M" includeMargin={true} />}</div>}
-      {payMethod === "Transfer Bank" && <div className="customer-banks" data-testid="customer-banks">
-        {banks.length ? banks.map((b) => <div className="bank-line" key={b.id}><b>{b.bank_name}</b><span className="mono">{b.account_number}</span><small>a.n. {b.holder_name}</small></div>) : <div className="hint">Belum ada rekening bank terdaftar</div>}
-      </div>}
-      {payMethod !== "Tunai" && <>
-        <label className="customer-label">Upload bukti pembayaran</label>
-        <input type="file" accept="image/*" onChange={handleFile} data-testid="customer-proof-input" />
-        {proof && <div className="proof-thumb"><img src={proof} alt="bukti" /><Check size={16} color="#059669"/></div>}
-      </>}
-      <button className="primary-btn full" onClick={sendOrder} data-testid="customer-send-order"><Check size={15}/> Kirim pesanan ke kasir</button>
-      <button className="text-btn" onClick={() => setStep("menu")}>← Kembali ke menu</button>
-    </div>}
-    {step === "done" && <div className="customer-done" data-testid="customer-done">
-      <div className="brand-mark big"><Check size={30}/></div>
-      <h2>Pesanan terkirim!</h2>
-      <p>{customerName} · Meja {tableParam} · {money(total)}</p>
-      <div className="tracker" data-testid="order-tracker">
-        {["Pesanan Diterima", "Sedang Dibuat", "Siap Diambil", "Selesai"].map((label, idx) => {
-          const done = trackerIdx >= idx;
-          return <div key={label} className={`tracker-step ${done ? "done" : ""}`}>
-            <i>{done ? <Check size={12}/> : idx + 1}</i>
-            <span>{label}</span>
-          </div>;
-        })}
-      </div>
-      <span>Status live: <b data-testid="live-status">{status}</b></span>
-    </div>}
+      <label className="csa-label">Catatan (opsional)</label>
+      <input className="csa-input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Less sugar / Tanpa es / Extra hot" data-testid="csa-notes-input"/>
+      <button className="csa-submit" disabled={!pick} onClick={() => onAdd(pick, notes)} data-testid="csa-add-to-cart">Tambahkan · {money(pick?.price || 0)}</button>
+    </div>
   </div>;
 }
 
@@ -2033,4 +2217,116 @@ function Login({ onLogin }) {
       </div>
     </form>
   </div>;
+}
+
+// -------- Notification Drawer (Batch B #3) --------
+function NotificationDrawer({ notif, onClose, setPage, onMarkAll }) {
+  const items = notif?.items || [];
+  const iconFor = (t) => t === "stock" ? Package : t === "shift" ? UserCheck : t === "order" ? ShoppingCart : Bell;
+  const colorFor = (s) => s === "critical" ? "#ef4444" : s === "warning" ? "#f59e0b" : "#3b82f6";
+  const timeAgo = (iso) => {
+    const d = new Date(iso); const m = Math.max(0, Math.floor((Date.now() - d.getTime()) / 60000));
+    if (m < 1) return "baru saja"; if (m < 60) return `${m}m lalu`; const h = Math.floor(m/60); if (h < 24) return `${h}j lalu`; return `${Math.floor(h/24)}h lalu`;
+  };
+  return <div className="notif-back" onClick={onClose}>
+    <aside className="notif-drawer" onClick={(e) => e.stopPropagation()} data-testid="notif-drawer">
+      <div className="notif-head">
+        <div><b>Notification Center</b><span>{items.length} alert aktif</span></div>
+        <button className="modal-close" onClick={onClose}><X size={18}/></button>
+      </div>
+      <div className="notif-body">
+        {items.length === 0 ? <div className="empty-hint" style={{padding: 40}}>Tidak ada notifikasi</div>
+          : items.map((n) => {
+            const Icon = iconFor(n.type);
+            return <button key={n.id} className={`notif-row ${n.severity}`} onClick={() => setPage(n.action || "overview")} data-testid={`notif-${n.id}`}>
+              <div className="notif-icon" style={{ background: `${colorFor(n.severity)}22`, color: colorFor(n.severity) }}><Icon size={16}/></div>
+              <div className="notif-info">
+                <b>{n.title}</b>
+                <span>{n.detail}</span>
+                <em>{timeAgo(n.created_at)}</em>
+              </div>
+              <ChevronRight size={14} color="#a0a9b5"/>
+            </button>;
+          })}
+      </div>
+      <div className="notif-foot">
+        <button onClick={onMarkAll} data-testid="notif-mark-all"><Check size={14}/> Tandai Semua Dibaca</button>
+      </div>
+    </aside>
+  </div>;
+}
+
+// -------- Printer Settings (Batch B #7.2) --------
+function PrinterSettings({ notify }) {
+  const [connected, setConnected] = useState(isPrinterConnected());
+  const [name, setName] = useState(pairedPrinterName() || "");
+  const [paper, setPaper] = useState(() => { try { return localStorage.getItem("mjd_paper_size") || "80mm"; } catch { return "80mm"; } });
+  const [alloc, setAlloc] = useState(() => { try { return localStorage.getItem("mjd_printer_role") || "cashier"; } catch { return "cashier"; } });
+  const supported = isPrinterSupported();
+  useEffect(() => { try { localStorage.setItem("mjd_paper_size", paper); } catch {} }, [paper]);
+  useEffect(() => { try { localStorage.setItem("mjd_printer_role", alloc); } catch {} }, [alloc]);
+  const pair = async () => {
+    try {
+      const dev = await pairPrinter();
+      setConnected(true); setName(dev?.name || pairedPrinterName() || "Printer terhubung");
+      notify(`Printer ${dev?.name || ""} tersambung`);
+    } catch (e) { notify(`Gagal pair: ${e.message || e}`); }
+  };
+  const test = async () => {
+    try {
+      await directPrint(buildSaleReceipt({
+        merchant: "MJD Kupi", outlet: "Test Print", cashier: "System",
+        lines: [{ name: "Test Print", quantity: 1, price: 0 }],
+        subtotal: 0, tax: 0, total: 0, method: "TEST", change: 0, cash: 0,
+      }, paper));
+      notify("Test print terkirim ke printer");
+    } catch (e) { notify(`Gagal test print: ${e.message || e}`); }
+  };
+  return <>
+    <SectionHeader eyebrow="HARDWARE" title="Pengaturan Printer" description="Konfigurasi printer thermal ESC/POS via Web Bluetooth. Set alokasi per role (Kasir / Dapur / Barista)."
+      action={<button className="primary-btn" onClick={pair} data-testid="printer-pair-button" disabled={!supported}><Bluetooth size={14}/> Pair Printer</button>} />
+    {!supported && <div className="warn-banner">⚠️ Web Bluetooth tidak didukung di browser ini. Gunakan Chrome/Edge di HTTPS.</div>}
+    <div className="panel product-form-v2" data-testid="printer-settings">
+      <div className="form-heading"><div className="form-icon"><Printer size={18}/></div>
+        <div><h2>Status Koneksi</h2><span>Kelola printer thermal aktif</span></div>
+      </div>
+      <div className="printer-status-row">
+        <div className={`printer-status-card ${connected ? "on" : "off"}`} data-testid="printer-status">
+          <div className="ps-dot"/>
+          <div><b>{connected ? "Terhubung" : "Terputus"}</b><span>{connected ? name || "Printer thermal" : "Klik Pair Printer untuk menyambung"}</span></div>
+        </div>
+        <div className="printer-fields">
+          <label>Ukuran Kertas
+            <select value={paper} onChange={(e) => setPaper(e.target.value)} data-testid="printer-paper-select">
+              <option value="58mm">58mm (Mini)</option>
+              <option value="80mm">80mm (Standar)</option>
+            </select>
+          </label>
+          <label>Alokasi Role Printer
+            <select value={alloc} onChange={(e) => setAlloc(e.target.value)} data-testid="printer-role-select">
+              <option value="cashier">🧾 Printer Kasir (Struk pelanggan)</option>
+              <option value="kitchen">🍳 Printer Dapur / KDS (Tiket dapur)</option>
+              <option value="barista">☕ Printer Barista (Tiket minuman)</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div className="modal-actions">
+        <button className="outline-btn" onClick={test} disabled={!connected} data-testid="printer-test-button"><Printer size={14}/> Test Print</button>
+        <button className="primary-btn" onClick={pair} data-testid="printer-repair-button"><RefreshCw size={14}/> {connected ? "Ganti Printer" : "Pair Sekarang"}</button>
+      </div>
+    </div>
+    <div className="panel product-form-v2">
+      <div className="form-heading"><div className="form-icon"><Info size={18}/></div>
+        <div><h2>Panduan Konfigurasi</h2><span>Tips agar cetakan struk & tiket dapur berjalan mulus</span></div>
+      </div>
+      <ul className="printer-tips">
+        <li>Nyalakan printer Bluetooth, pastikan mode pairing (biasanya lampu berkedip).</li>
+        <li>Klik <b>Pair Printer</b> — browser akan menampilkan daftar perangkat terdekat.</li>
+        <li>Pilih printer thermal Anda, lalu klik <b>Test Print</b>.</li>
+        <li>Alokasi role menentukan template cetakan otomatis: Kasir mencetak struk lengkap, Dapur mencetak tiket dapur singkat.</li>
+        <li>Untuk multi-printer, konfigurasi 1 device per browser/perangkat.</li>
+      </ul>
+    </div>
+  </>;
 }

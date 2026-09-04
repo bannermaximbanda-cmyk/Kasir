@@ -79,12 +79,43 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
   - Backend: `/api/dashboard/analytics?mode=daily|hourly&outlet_id=` returns kpi/trend/payment_breakdown/top_products/low_stock/outlet_compare
 - [x] **Global Ops Status Bar**: "POS: Online · Shift: Active (Budi)" indicator in top header with pulsing green dot
 
+### Iteration 13-14 (Feb 2026 Batch B — Customer-Facing & Ops)
+- [x] **Self-Order Mobile Overhaul (#4)**: GoFood-style redesign
+  - Hero header dengan banner branding + logo bulat + "Buka - Menerima Pesanan" pulsing dot
+  - Sticky search bar + horizontal category tabs
+  - Product cards HD image + vendor badge + variant "Mulai Rp X" pricing hint
+  - Floating bottom cart bar (fixed) dengan "[X] Item · Total · Lanjut ke Pembayaran →"
+  - Variant selection drawer (bottom sheet) dengan pilihan + Catatan Khusus
+  - Checkout drawer dengan Nama + WhatsApp (required) + itemized breakdown + payment method
+  - Payment: QRIS Toko / Transfer Bank / Bayar di Kasir + upload bukti
+  - Order tracking stepper (4-langkah) dengan icon + real-time status polling 4s
+  - Digital receipt summary di halaman tracking
+- [x] **QR Meja Custom Domain (#5)**: Config Base URL + Store ID/Slug + Outlet Target
+  - Preview URL live dengan format `{baseURL}/self-order?store_id=X&outlet_id=Y&table=NN`
+  - Auto re-render semua QR saat Base URL berubah, localStorage persistence
+  - Print-ready cards dengan brand logo, MEJA XX, CTA scan, level="H" QR
+  - Tombol "Cetak Semua QR (PDF)" mass print via CSS media print
+- [x] **Notification Center (#3)**: Bell icon di header dengan badge counter
+  - Backend `/api/notifications` aggregate: stock kritis + shift closing + pesanan baru (max 10 items after sort)
+  - Slide-over drawer dari kanan dengan kategori icon + severity color (critical/warning/info)
+  - Timeago labels ("baru saja", "5m lalu", "2j lalu")
+  - Click item → jump ke halaman terkait (inventory/cashiers/pos)
+  - Polling 15 detik + button "Tandai Semua Dibaca"
+- [x] **Printer Settings Dedicated Menu (#7.2)**: Menu 🖨️ standalone
+  - Status koneksi card (Terhubung/Terputus) dengan nama printer
+  - Ukuran kertas 58mm/80mm selector
+  - Alokasi role Kasir / Dapur / Barista dropdown
+  - Web Bluetooth pair + Test Print + Panduan konfigurasi
+  - Accessible untuk Kasir & Admin (bukan cuma Super Admin)
+- [x] **Backend fixes iter13→14**: accept endpoint status allow-list expanded, `customer_phone` column + persistence, notifications truncated to 10
+
 ## Testing status
 - **iter10**: 25/25 backend tests PASSED
 - **iter11**: 15/15 backend tests PASSED
-- **iter12**: 9/9 backend tests PASSED (PPN server-side enforcement, dashboard analytics both modes, outlet scope 'all', Kasir RBAC)
-- **Regression**: 49/49 total when run sequentially
-- **Frontend**: verified via screenshot — dashboard KPI + Area/Donut/Bar charts, PPN toggle real-time preview, outlet switcher "Semua Outlet" mode
+- **iter12**: 9/9 backend tests PASSED
+- **iter13-14**: 8/8 backend tests PASSED + 3 critical bugs fixed
+- **Regression**: **57/57 total** when run sequentially
+- **Frontend**: verified via screenshot — Self-Order mobile (hero + cart), Notification Drawer (10 items), QR Config form + branded cards, Printer Settings menu
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.

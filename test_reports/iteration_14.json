@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration 14 — retest of Batch B fixes. All 3 bugs from iter13 confirmed FIXED. iter13 test suite now 8/8 PASSED (was 7/8). Full regression iter10+iter11+iter12+iter13 = 57/57 PASSED. Verified: (1) POST /api/self-order/{id}/accept now accepts status='Pesanan Diterima' (server.py:1218 allow-list expanded) — kasir successfully accepts newly-created self-orders, sale created with variant.price authoritative (server ignored client-sent wrong_price=1.0 and used variant.price*qty), notes 'extra hot please' persisted in sale.lines[0].notes, variant_id + variant_name preserved. (2) SelfOrderInput.customer_phone now persisted to mjd_self_orders.customer_phone column — verified directly via DB query: TEST_Phone_User row has customer_phone='6281234567890', TEST_Variant_User row has '628999'. (3) GET /api/notifications capped to <=10 items after sort+truncate — test_max_items_bound updated from <=25 to <=10 and passes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/notifications", "issue": "created_at for 'stock' items still set to request-time now() rather than a real event time; stock notifications always outrank shift/order items in sort. Not blocking, but sort order is not semantically meaningful."},
+      {"endpoint": "GET /api/notifications", "issue": "unread_count == len(items); no read-state persistence so frontend badge cannot decrement across polls."},
+      {"endpoint": "GET /api/self-order/{id}/status", "issue": "customer_phone is persisted but not returned in the public status endpoint response — consider echoing it back for customer confirmation UX."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration13_notifications_selforder.py",
+    "/app/test_reports/pytest/iteration_14_iter13.xml",
+    "/app/test_reports/pytest/iteration_14_regression.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: return customer_phone in /api/self-order/{id}/status payload.",
+    "OPTIONAL: use product.updated_at (or last_restock_at) for stock notification created_at so ordering is meaningful.",
+    "OPTIONAL: implement read-state persistence for notifications so unread_count is accurate."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1218 fix looks correct: `if order.status not in ('Menunggu kasir','Menunggu konfirmasi','Pesanan Diterima')`. Consider removing the deprecated 'Menunggu konfirmasi' entry if no code path still emits it.",
+    "server.py:1167 correctly forwards customer_phone into the SelfOrder ORM object; verified persisted end-to-end.",
+    "Notification truncation to top-10 after global sort now respects spec.",
+    "server.py is now ~2032 lines — still exceeds the 700-line guideline; suggest splitting routers/{notifications,self_order,dashboard}.py."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration13_notifications_selforder.py (max_items_bound: 25 -> 10)"
+  ],
+  "success_rate": {"backend": "100% (57/57 across iter10+iter11+iter12+iter13)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "superadmin/.Superadmin1_ and kasir/MjdKupi#2026 (both work).",
+  "seed_data_creation": "TEST_ prefixed self-orders (11 rows) were created during testing and DELETED from mjd_self_orders after verification. DB clean.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Batch B fixes are green. All three iter13 blockers resolved. If new tests are added, note that pytest.ini enables xdist loadscope automatically. Kasir must have an open shift at outlet-sudirman; the kasir_sess fixture opens one if none exists. The /api/self-order/{id}/status endpoint still does NOT echo customer_phone — if a test wants to verify phone persistence via API only, it currently must go through admin/DB path; iter14 verified via direct SQL on mjd_self_orders.",
+  "rca of the issue": "All three iter13 bugs confirmed fixed by main agent: (a) server.py:1218 accept guard extended to include 'Pesanan Diterima' — verified by successfully accepting a newly-created self-order end-to-end and receiving a valid sale response. (b) models.py SelfOrder.customer_phone column present and create_self_order writes payload.customer_phone (server.py:1167); DB inspection confirms row has phone value. (c) /api/notifications applies post-sort truncation to top-10; test_max_items_bound with strict <=10 assertion passes."
+}

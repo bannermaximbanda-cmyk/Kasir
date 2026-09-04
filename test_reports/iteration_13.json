@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 13 (MJD Kupi Batch B) backend validation. New test file /app/backend/tests/test_iteration13_notifications_selforder.py — 8 tests. Result: 7 PASSED / 1 FAILED. PASSED: (1) GET /api/notifications for Super Admin returns {items, unread_count}, each item has id/type/severity/title/detail/created_at/action with type in {stock,shift,order} and severity in {critical,warning,info}. (2) Items sorted newest-first (created_at desc). (3) outlet_id=outlet-kemang scope filter — stock details reference 'Kemang' only. (4) Kasir RBAC scope — even when kasir passes ?outlet_id=outlet-kemang, server forces their own outlet (outlet-sudirman); stock item IDs identical between calls, no Kemang leakage. (5) Bounded item count <=25. (6) POST /api/self-order accepts customer_phone='6281234567890' — order persisted, status endpoint returns customer_name. (7) Missing customer_name → 400. FAILED: /api/self-order/{id}/accept variant flow — accept endpoint returns 400 'Pesanan sudah Pesanan Diterima' because it only allows status ∈ ('Menunggu kasir','Menunggu konfirmasi') but the SelfOrder model default (models.py:144) and migration (server.py:1916) both set new orders to 'Pesanan Diterima'. This blocks the entire self-order → kasir accept → sale flow. Regression: iter10 (25) + iter11 (15) + iter12 (9) = 49/49 PASSED sequentially.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/self-order/{id}/accept", "issue": "Status allow-list is stale — accept requires status in ('Menunggu kasir','Menunggu konfirmasi') at server.py:1216, but new self-orders are created with status='Pesanan Diterima' (models.py:144 default, and migration server.py:1916 also rewrites 'Menunggu kasir' → 'Pesanan Diterima'). Result: ALL newly-created self-orders are un-acceptable by kasir → variant price authoritative check and notes storage cannot be verified end-to-end. Fix: include 'Pesanan Diterima' in the allow-list, or change create_self_order to insert with 'Menunggu kasir'.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/self-order", "issue": "SelfOrderInput.customer_phone is accepted by Pydantic but silently DROPPED — the SelfOrder DB model has no customer_phone column (models.py:136-148), so the value is not persisted. Add customer_phone column + migration if this data is required for follow-up/marketing."},
+      {"endpoint": "GET /api/notifications", "issue": "created_at for 'stock' items is set to now() at request time (not the actual stock event time), so ordering by created_at treats all stock items as newest — they always outrank older shift/order items in the sort. Consider using product.updated_at or last_restocked_at."},
+      {"endpoint": "GET /api/notifications", "issue": "Unread_count == len(items) — there is no read/unread persistence; every fetch reports every item as unread. Frontend badge will never decrement. Consider a NotificationRead join table or last_seen timestamp per user."},
+      {"endpoint": "GET /api/notifications", "issue": "Combined caps: 10 stock + 5 shift + 10 order = up to 25 items — spec says 'max 10 items mix'. Consider a single overall cap of 10 after sorting."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration13_notifications_selforder.py",
+    "/app/test_reports/pytest/iteration_13_results.xml",
+    "/app/test_reports/pytest/iteration_13_regression.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix /api/self-order/{id}/accept status allow-list at server.py:1216 to include 'Pesanan Diterima' — currently kasir cannot accept ANY newly created self-order (regression bug affects entire QR self-order workflow).",
+    "Add customer_phone column to SelfOrder model + Alembic-style migration in run_migrations, otherwise the newly accepted customer_phone field is silently discarded on persist.",
+    "Fix stock notification created_at to reflect real event time (or last stock adjustment), not now() — otherwise sort order is meaningless.",
+    "Reduce notifications overall cap to 10 per spec (or document that 25 is intentional).",
+    "Consider implementing read-state persistence so unread_count actually reflects unread items."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1153 checks payload.customer_name but never uses payload.customer_phone — Pydantic validates it but the field is not written to the DB. Field is decorative until a column is added.",
+    "server.py:1216 status guard is the only reason the whole self-order → sale flow doesn't work; this is not new in iter13 but is exposed by iter13 testing. Suggest also stripping the deprecated 'Menunggu konfirmasi' entry.",
+    "Notification builder queries stock+shift+order separately in Python then sorts; for large N this is fine but the individual limits (10/5/10) yield up to 25 items — inconsistent with spec of 10 max. Post-sort truncation `items = items[:10]` would fix.",
+    "server.py is now 2029 lines — still well over the 700-line guideline; consider splitting routers/{notifications,self_order,dashboard}.py.",
+    "Notification stock items use `p.outlet_id.replace('outlet-','').title()` — will KeyError if outlet_id is None; also breaks for outlets not named 'outlet-*'. Consider a lookup table by outlet_id → display_name."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration13_notifications_selforder.py (new)",
+    "/app/test_reports/pytest/iteration_13_results.xml",
+    "/app/test_reports/pytest/iteration_13_regression.xml"
+  ],
+  "success_rate": {"backend": "88% (iter13 7/8 + iter10 25/25 + iter11 15/15 + iter12 9/9 = 56/57)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "superadmin/.Superadmin1_ and kasir/MjdKupi#2026 (both work).",
+  "seed_data_creation": "A couple of TEST_ prefixed self-orders (Meja TEST_PHONE, Meja TEST_VAR) with customer_name 'TEST_Phone_User'/'TEST_Variant_User' remain in DB in status 'Pesanan Diterima' (they could not be accepted due to the critical bug above). Cleanup TBD once accept endpoint is fixed.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The critical bug is server.py:1216 accept status list mismatch. Once main agent fixes it, re-run test_iteration13_notifications_selforder.py::TestSelfOrderCustomerPhone::test_accept_variant_price_authoritative_and_notes_stored — the test will then validate: (a) server uses variant.price authoritatively (client sends price=1.0, server must compute expected=variant.price*qty), (b) notes 'extra hot please' stored in sale.lines[0].notes, (c) variant_id + variant_name preserved. Iter13 test file also handles a transient Cloudflare 502 by simple retry; if you see 502, wait 10s and re-run. To keep tests deterministic run with `-n 0` (xdist parallel is safe for iter13 alone but the kasir-scope test can be racy under xdist due to inter-test order creation).",
+  "rca of the issue": "Accept endpoint (server.py:1206-1217) was written when new self-orders had status='Menunggu kasir'. A later change moved the default+migration to 'Pesanan Diterima' (models.py:144 and server.py:1916 UPDATE) but the accept guard was not updated. Now every new self-order created via POST /api/self-order lands in status 'Pesanan Diterima', which is not in the allow-list, so the kasir accept action fails with HTTP 400. Reproduction: (1) POST /api/self-order with valid payload → 200, status='Pesanan Diterima'. (2) POST /api/self-order/{id}/accept as kasir → 400 'Pesanan sudah Pesanan Diterima'. Mitigation: change server.py line 1216 to `if order.status not in ('Menunggu kasir','Menunggu konfirmasi','Pesanan Diterima'):`."
+}
