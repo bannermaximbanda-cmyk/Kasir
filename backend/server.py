@@ -1943,17 +1943,37 @@ async def shift_report(
     transfer = sum(s.total for s in sales if s.payment_method != "Cash")
     tables_paid = len({s.table_no for s in sales})
 
-    # Pending self-orders on this shift's day (Menunggu kasir)
+    # Pending self-orders on this shift's outlet (informational)
     pending_r = await db.execute(
-        select(M.SelfOrder).where(M.SelfOrder.status == "Menunggu kasir")
+        select(M.SelfOrder).where(
+            M.SelfOrder.status == "Menunggu kasir",
+            M.SelfOrder.outlet_id == (shift.outlet_id or "outlet-sudirman"),
+        )
     )
     pendings = pending_r.scalars().all()
     tables_pending = len({o.table_no for o in pendings})
     unpaid_total = sum(o.total for o in pendings)
 
-    # Expenses today
-    exp_r = await db.execute(select(func.coalesce(func.sum(M.Expense.amount), 0)))
+    # Expenses SCOPED to this shift only (Bug fix: previously summed ALL expenses across time)
+    # Rule: expense only counted if explicitly linked via shift_id. Un-linked expenses (created
+    # outside an active shift) MUST NOT appear in a cashier's shift balance calculation.
+    exp_r = await db.execute(
+        select(func.coalesce(func.sum(M.Expense.amount), 0)).where(
+            M.Expense.shift_id == shift_id,
+            M.Expense.outlet_id == (shift.outlet_id or "outlet-sudirman"),
+        )
+    )
     expenses_total = float(exp_r.scalar_one() or 0)
+    # Cash-only expenses subset (used for expected_cash reconciliation on drawer)
+    cash_exp_r = await db.execute(
+        select(func.coalesce(func.sum(M.Expense.amount), 0)).where(
+            M.Expense.shift_id == shift_id,
+            M.Expense.outlet_id == (shift.outlet_id or "outlet-sudirman"),
+            M.Expense.method == "Cash",
+        )
+    )
+    cash_expenses = float(cash_exp_r.scalar_one() or 0)
+    expected_cash = float(shift.opening_cash or 0) + float(cash) - cash_expenses
 
     # Per merchant breakdown
     per_merchant: dict[str, float] = {}
@@ -1971,7 +1991,9 @@ async def shift_report(
         "tables_paid": tables_paid,
         "tables_pending": tables_pending,
         "unpaid_total": float(unpaid_total),
-        "expenses_total": expenses_total,
+        "expenses_total": expenses_total,        # scoped: shift_id + outlet_id
+        "cash_expenses": cash_expenses,          # cash-method subset only
+        "expected_cash": expected_cash,          # modal awal + cash sales - cash expenses
         "transaction_count": len(sales),
         "per_merchant": per_merchant,
     }
