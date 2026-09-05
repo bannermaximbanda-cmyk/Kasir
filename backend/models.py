@@ -79,6 +79,8 @@ class Product(Base):
     price = Column(Float, default=0.0)
     cost = Column(Float, default=0.0)
     stock = Column(Integer, default=0)
+    sku = Column(String(80), default="", index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
     color = Column(String(16), default="#ffedd5")
     image_url = Column(Text, default="")
     modifiers = Column(JSON, default=list)

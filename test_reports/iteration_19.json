@@ -1,0 +1,34 @@
+{
+  "summary": "Backend regression for Product Management overhaul (iteration 20 spec): SKU + is_active fields on Product, strict visibility rules for anonymous/kasir/admin, bulk-import upsert-by-sku, admin outlet isolation, and Batch C + sales/stock-movement + shift-report regression. 16/16 tests PASS.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/products", "issue": "When include_inactive=1 is passed by a non-Admin role (e.g. Kasir), the flag is silently ignored (still filters). Consider returning 403 or documenting; current silent-ignore is safe but confusing."},
+      {"endpoint": "POST /api/products/bulk-import", "issue": "Admin outlet-isolation silently rewrites outlet_id; no per-row 'forced_outlet' info returned. Same observation as iteration_18."},
+      {"endpoint": "POST /api/products/bulk-import", "issue": "Row with sku='' does NOT dedupe by sku (falls through to name match). Documented as intended by code (`if row.sku` guard), but importers reusing empty-sku rows will match by name only."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration20_product_mgmt.py",
+    "/app/test_reports/pytest/iter20.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py list_products (594-622): rule works correctly, but include_inactive is a truthy query bool — FastAPI treats '?include_inactive=1' as True. Confirmed OK. However `outlet_scope(user, outlet_id)` for Super Admin returns None (no scope), so `outlet_id=` filter is not applied for Super Admin — Super Admin catalog page always sees ALL outlets, not just requested outlet_id. If Admin catalog UI passes outlet_id and expects that outlet only, behaviour differs by role. Recommend applying `outlet_id` filter for authed users too when explicitly provided.",
+    "server.py 1602-1661 bulk_import_products: no per-row rollback on failure; commits at end. If row N fails DB-level (e.g., UNIQUE), all prior rows are still lost due to raised exception without try/except around each row. Consider try/except-per-row appending to errors[].",
+    "Product.sku is not enforced UNIQUE per outlet at DB level (models.py). Duplicates possible if bulk-import matches by sku but two rows in same batch reuse sku → race not possible in single request but concurrent imports could duplicate.",
+    "server.py 592-622 list_products: anonymous path uses `outlet_id` from query directly — no validation the outlet exists; harmless but returns [] for typos.",
+    "server.py is now 2512 lines. Repeat of iteration_18 comment: needs router split."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration20_product_mgmt.py (new)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "N/A (not requested)"},
+  "test_credentials": "superadmin/.Superadmin1_, admin/MjdKupi#2026, kasir/MjdKupi#2026. CSRF header X-Requested-With: mjd-kupi verified for POST/PUT.",
+  "seed_data_creation": "Test products prefixed TEST_ (Active, Inactive, ExistingForUpsert, BrandNew, BulkInactive, IsoAttempt). Not deleted after run — accumulates over iterations. Safe (all inactive by end / TEST_-prefixed).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 20 product-management-overhaul is fully validated at the API contract level. Anonymous /api/products?outlet_id=… strictly filters is_active=false. Kasir /api/products default hides inactive, and include_inactive=1 is silently ignored for non-admin (defensive). Super Admin /api/products?include_inactive=1 returns is_active + sku fields on every row. Bulk-import matches order: id > sku(+outlet) > name(+outlet); duplicate SKU updates existing, empty name → errors[]. Admin bulk-import outlet_id is force-rewritten to admin's own outlet (isolation OK). Regression still green: settlement/preview, inventory/stock-movements, settings/sound_config, sales→stock-movement(kind='sale'), shift report expenses_total scoped to shift_id.",
+  "rca of the issue": "N/A — one test failure during first run was a MY-test payload bug (missing subtotal/total on POST /api/sales). Fixed in-test; backend behaviour correct."
+}

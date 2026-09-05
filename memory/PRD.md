@@ -161,6 +161,32 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - **Cumulative**: **101/94+ total** (iter10-19)
 - **Frontend**: verified via screenshot — Inventory tabs (Stok/Mutasi/Excel) + Settlement per-merchant + Payout Ledger + PayoutConfirm modal + SoundSettings switch
 
+## Iteration 21 (Feb 2026 — POS & Self-Order Pagination + Fixed Scroll Container)
+- [x] **Fixed viewport container**: `.menu-scroll` (POS) & `.csa-scroll` (Self-Order) dengan `max-height: calc(100vh - Xpx)` + `overflow-y: auto`. Header, search bar, category tabs, dan cart panel tetap terlihat penuh saat browsing menu.
+- [x] **Pagination bar reusable** (`<PaginationBar/>`): "Menampilkan X-Y dari Z menu" + tombol `‹ Sebelumnya`, page numbers with ellipsis (contoh: `[1] [2] [3] … [10]`), `Selanjutnya ›`. Active page highlighted vibrant orange.
+- [x] **`usePagination` hook**: default 12 items/page, auto-reset ke page 1 saat search query / kategori berubah / total items berubah (dependency array).
+- [x] **Compact 4-column grid POS Desktop**: `.pos-layout .product-grid { grid-template-columns: repeat(4, 1fr); }`; step-down ke 3 col @1280px & 2 col @1000px & mobile.
+- [x] **Cart panel POS**: `max-height: calc(100vh - 180px); overflow: hidden` + `.cart-items { overflow-y: auto }` — panel tetap sticky sementara isi keranjang scrollable.
+- [x] **Custom scrollbar styling**: `::-webkit-scrollbar-thumb { background: #d5dbe1 }` dengan orange hover state.
+- [x] **Verified via screenshot**: 12 produk POS di page 1, click ke page 2 tampil produk ke-13 (`TEST_Reactivated`), search "kopi" reset ke page 1 dengan 1 hasil. Self-Order Mobile scroll internal berjalan mulus.
+
+
+- [x] **Search & Filter Bar (sticky)**: Search by name/SKU, Kategori dropdown, Merchant dropdown, Status tabs (Semua/Aktif/Tidak Aktif) with live counters
+- [x] **CSV Template + Excel Import/Export**:
+  - "Unduh Template CSV" (BOM-safe UTF-8) with columns nama_produk, sku, merchant_id, kategori, harga_jual, hpp_per_porsi, stok_awal, outlet_id, is_active
+  - "Export Data" → xlsx with 11 columns including varian count
+  - "Import Produk" modal with preview (first 20 rows), inline error report, SKU dedup on client + backend, upsert order: id → sku(+outlet) → name(+outlet)
+- [x] **Full Edit Modal (Pencil icon)**: Name, SKU, Merchant, Category, Price, HPP, Stock, Image re-upload, is_active toggle, Variants CRUD (name/price/cost/active)
+- [x] **is_active toggle**: on card (switch) + in modal (large switch with descriptive label); auto-notifies "hilang dari POS & self-order"
+- [x] **Strict visibility rules (backend enforced)**:
+  - Anonymous `/api/products?outlet_id=X` → strictly `is_active=true`
+  - Auth Kasir/Vendor default → strictly `is_active=true`
+  - Admin/Super Admin catalog page `?include_inactive=1` → sees ALL with "TIDAK AKTIF" badge
+  - Frontend also filters POS grid & self-order via `p.is_active !== false`
+- [x] **Backend changes**: `Product.sku` + `Product.is_active` columns (+ index), migrated via ALTER TABLE; `ProductInput` + `BulkProductRow` extended; SKU-first matching in bulk import
+- [x] **Tests**: iteration_20 = 16/16 pass (SKU dedup, admin-isolation, visibility rules, regression: sales→stock-movement, shift expenses, settlement, sound_config)
+
+
 ## Iteration 19 (Feb 2026 Batch C — Vendor Settlement + Advanced Inventory + Excel + Sound)
 - [x] **Vendor Settlement Center (#7.1)**: New tabbed VendorCenter with Antrean Order | Settlement per Merchant | Riwayat Payout
   - Per-merchant breakdown honoring `commission_scheme` (percent/fixed) & `commission_fixed`

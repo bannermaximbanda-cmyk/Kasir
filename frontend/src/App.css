@@ -793,3 +793,116 @@
 .online-item.busy { opacity: 0.55; pointer-events: none; }
 .online-item.busy .online-actions button { cursor: not-allowed; }
 button:disabled { cursor: not-allowed; opacity: 0.7; }
+
+/* ── Product Filter & Search Bar ────────────────────────────── */
+.product-filter-bar {
+  position: sticky; top: 12px; z-index: 5;
+  background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; margin-bottom: 18px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  box-shadow: 0 4px 12px #18212b0a;
+}
+.product-filter-bar .pf-search {
+  flex: 1; min-width: 220px;
+  background: #f6f8fb; border: 1px solid var(--line); border-radius: 8px;
+  padding: 0 12px; display: flex; align-items: center; gap: 8px; color: #9ba4af;
+}
+.product-filter-bar .pf-search input {
+  border: 0; outline: 0; background: transparent; flex: 1; padding: 10px 0; font-size: 12px; color: var(--ink);
+}
+.product-filter-bar > select {
+  border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px;
+  font-size: 12px; background: #fff; color: #505b69; min-width: 160px;
+}
+.pf-tabs { display: inline-flex; gap: 4px; background: #f6f8fb; padding: 4px; border-radius: 8px; }
+.pf-tabs button {
+  border: 0; background: transparent; color: #718096; font-size: 11px; font-weight: 700;
+  padding: 8px 14px; border-radius: 6px;
+}
+.pf-tabs button.active { background: #fff; color: var(--orange-dark); box-shadow: 0 1px 3px #18212b1a; }
+
+/* ── Product Card Inactive State ────────────────────────────── */
+.catalog-item.is-inactive { opacity: 0.55; }
+.catalog-item.is-inactive .product-art { filter: grayscale(0.6); }
+.inactive-badge {
+  position: absolute; top: 6px; left: 6px;
+  background: #991b1b; color: #fff;
+  font: 700 9px 'Space Grotesk'; letter-spacing: 0.5px;
+  padding: 3px 6px; border-radius: 4px; z-index: 2;
+}
+.cat-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.is-active-switch input { appearance: none; width: 34px; height: 20px; background: #e6eaf0; border-radius: 12px; position: relative; transition: background .2s; margin: 0; }
+.is-active-switch input:checked { background: var(--green); }
+.is-active-switch input::before { content: ""; position: absolute; width: 14px; height: 14px; background: #fff; border-radius: 50%; top: 3px; left: 3px; transition: transform .2s; }
+.is-active-switch input:checked::before { transform: translateX(14px); }
+
+/* ── Excel/Import Modal Preview Table ───────────────────────── */
+.pay-modal.wide { width: min(920px, 92vw); max-height: 88vh; overflow-y: auto; padding: 24px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.empty-hint { padding: 12px; font-size: 12px; color: #6b7280; background: #f6f8fb; border-radius: 6px; margin: 8px 0; }
+
+/* Mobile responsive filter bar */
+@media (max-width: 700px) {
+  .product-filter-bar { flex-direction: column; align-items: stretch; }
+  .product-filter-bar > select, .pf-tabs { width: 100%; }
+  .pf-tabs { justify-content: space-between; }
+}
+
+/* ── POS Menu Scroll Container (Iteration 21) ─────────────── */
+.pos-layout { align-items: stretch; }
+.menu-area { display: flex; flex-direction: column; min-height: 0; }
+.menu-scroll {
+  flex: 1; min-height: 0;
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+  padding-right: 4px;
+  border: 1px solid var(--line);
+  background: #fafbfc;
+  border-radius: 10px;
+  padding: 14px;
+}
+.menu-scroll::-webkit-scrollbar { width: 8px; }
+.menu-scroll::-webkit-scrollbar-track { background: transparent; }
+.menu-scroll::-webkit-scrollbar-thumb { background: #d5dbe1; border-radius: 4px; }
+.menu-scroll::-webkit-scrollbar-thumb:hover { background: var(--orange); }
+
+/* Compact grid – 4 cols on desktop, 3 on mid, 2 on tablet */
+.pos-layout .product-grid { grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 1280px) { .pos-layout .product-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 1000px) { .pos-layout .product-grid { grid-template-columns: repeat(2, 1fr); } }
+
+/* Cart panel sticky within POS layout */
+.pos-layout .cart-panel { max-height: calc(100vh - 180px); overflow: hidden; display: flex; flex-direction: column; }
+.pos-layout .cart-items { overflow-y: auto; }
+
+/* ── Pagination Bar ────────────────────────────────────────── */
+.pagination-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 8px 4px; gap: 12px; flex-wrap: wrap;
+  border-top: 1px solid #eef1f4; margin-top: 12px;
+}
+.pg-info { color: #6b7280; font-size: 12px; }
+.pg-info b { color: var(--ink); font-weight: 700; }
+.pg-controls { display: inline-flex; align-items: center; gap: 4px; }
+.pg-btn, .pg-num {
+  border: 1px solid var(--line); background: #fff; color: #505b69;
+  border-radius: 6px; padding: 7px 12px; font-size: 12px; font-weight: 700;
+  min-width: 32px; text-align: center;
+}
+.pg-btn:hover:not(:disabled), .pg-num:hover { border-color: var(--orange); color: var(--orange-dark); }
+.pg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pg-num.active { background: var(--orange); border-color: var(--orange); color: #fff; box-shadow: 0 3px 8px #f9731633; }
+.pg-ellipsis { color: #9aa4b2; font-weight: 700; padding: 0 4px; }
+
+/* Self-Order (customer QR) internal scroll */
+.csa-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 80px; }
+.csa-scroll::-webkit-scrollbar { width: 6px; }
+.csa-scroll::-webkit-scrollbar-thumb { background: #d5dbe1; border-radius: 3px; }
+
+@media (max-width: 700px) {
+  .menu-scroll { max-height: calc(100vh - 300px); padding: 10px; }
+  .pos-layout .cart-panel { max-height: unset; }
+  .pagination-bar { flex-direction: column; align-items: stretch; gap: 8px; }
+  .pg-info { text-align: center; }
+  .pg-controls { justify-content: center; flex-wrap: wrap; }
+}

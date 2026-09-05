@@ -77,6 +77,8 @@ class ProductInput(BaseModel):
     price: float = 0
     cost: float = 0
     stock: int = 0
+    sku: str = ""
+    is_active: bool = True
     color: str = "#ffedd5"
     image_url: str = ""
     modifiers: List[Any] = []
@@ -592,11 +594,12 @@ async def delete_merchant(
 @api_router.get("/products")
 async def list_products(
     outlet_id: Optional[str] = None,
+    include_inactive: bool = False,
     db: AsyncSession = Depends(get_db),
     request: Request = None,
 ):
-    # Public (customer self-order): must specify outlet_id
-    # Authed: apply role-based outlet scope
+    # Public (customer self-order): must specify outlet_id + only active items
+    # Authed: apply role-based outlet scope; only admin catalog page passes include_inactive=true
     user = None
     try:
         user = await current_user(request, db) if request else None
@@ -607,11 +610,14 @@ async def list_products(
         scope = outlet_scope(user, outlet_id)
         if scope:
             stmt = stmt.where(M.Product.outlet_id == scope)
+        # Only Super Admin / Admin on catalog page may see inactive
+        if not (include_inactive and user.role in ("Super Admin", "Admin")):
+            stmt = stmt.where(M.Product.is_active == True)  # noqa: E712
     else:
-        # Anonymous: must specify outlet to prevent full catalog leak
+        # Anonymous: must specify outlet + always filter inactive
         if not outlet_id:
             raise HTTPException(status_code=400, detail="outlet_id wajib untuk akses publik")
-        stmt = stmt.where(M.Product.outlet_id == outlet_id)
+        stmt = stmt.where(M.Product.outlet_id == outlet_id, M.Product.is_active == True)  # noqa: E712
     result = await db.execute(stmt)
     return [to_dict(p) for p in result.scalars().all()]
 
@@ -636,6 +642,8 @@ async def create_product(
         price=payload.price,
         cost=payload.cost,
         stock=payload.stock,
+        sku=payload.sku or "",
+        is_active=bool(payload.is_active) if payload.is_active is not None else True,
         color=payload.color,
         image_url=payload.image_url,
         modifiers=payload.modifiers,
@@ -1581,6 +1589,8 @@ class BulkProductRow(BaseModel):
     price: float = 0
     cost: float = 0
     stock: int = 0
+    sku: str = ""
+    is_active: bool = True
     color: str = "#ffedd5"
 
 
@@ -1603,10 +1613,14 @@ async def bulk_import_products(
         target_outlet = row.outlet_id or user.outlet_id or "outlet-sudirman"
         if user.role == "Admin" and target_outlet != (user.outlet_id or "outlet-sudirman"):
             target_outlet = user.outlet_id or "outlet-sudirman"
-        # Match by id or name+outlet
+        # Match order: id > sku(+outlet) > name(+outlet)
         existing = None
         if row.id:
             existing = (await db.execute(select(M.Product).where(M.Product.id == row.id))).scalar_one_or_none()
+        if not existing and payload.mode == "upsert" and row.sku:
+            existing = (await db.execute(
+                select(M.Product).where(M.Product.sku == row.sku, M.Product.outlet_id == target_outlet)
+            )).scalar_one_or_none()
         if not existing and payload.mode == "upsert":
             existing = (await db.execute(
                 select(M.Product).where(M.Product.name == row.name, M.Product.outlet_id == target_outlet)
@@ -1617,6 +1631,9 @@ async def bulk_import_products(
             existing.price = float(row.price)
             existing.cost = float(row.cost)
             existing.stock = int(row.stock)
+            if row.sku:
+                existing.sku = row.sku
+            existing.is_active = bool(row.is_active)
             if row.merchant_id:
                 existing.merchant_id = row.merchant_id
             if row.color:
@@ -1633,6 +1650,8 @@ async def bulk_import_products(
                 price=float(row.price),
                 cost=float(row.cost),
                 stock=int(row.stock),
+                sku=row.sku or "",
+                is_active=bool(row.is_active),
                 color=row.color or "#ffedd5",
                 modifiers=[],
                 variants=[],
@@ -2338,6 +2357,9 @@ async def bootstrap():
         from sqlalchemy import text
         for stmt in (
             "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''",
+            "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS sku VARCHAR(80) DEFAULT ''",
+            "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            "CREATE INDEX IF NOT EXISTS idx_products_sku ON mjd_products(sku)",
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(32) DEFAULT ''",
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS payment_proof TEXT DEFAULT ''",
             "ALTER TABLE mjd_users ADD COLUMN IF NOT EXISTS username VARCHAR(64) UNIQUE",

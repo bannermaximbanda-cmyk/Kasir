@@ -8,7 +8,7 @@ import {
   Trash2, Users, Wallet, X, Building2, Volume2, MessageCircle, PlayCircle,
   StopCircle, UserCheck, Upload, Image as ImageIcon, Check, Copy, Shield,
   Eye, EyeOff, RefreshCw, Bluetooth, MapPin, Star, ChevronRight, Link as LinkIcon, Info,
-  Download, FileSpreadsheet, TrendingDown, TrendingUp, ArrowRightLeft,
+  Download, FileSpreadsheet, TrendingDown, TrendingUp, ArrowRightLeft, Pencil, Filter, Eye as EyeOn,
 } from "lucide-react";
 import { pairPrinter, directPrint, isPrinterConnected, pairedPrinterName, isPrinterSupported, buildSaleReceipt, buildShiftReport, buildKitchenTicket } from "@/utils/thermalPrinter";
 import { queueSale, drainQueue, queuedCount } from "@/utils/offlineQueue";
@@ -111,7 +111,10 @@ function AdminApp() {
   };
   const allowed = NAV_ITEMS.filter((n) => (NAV_BY_ROLE[role] || []).includes(n.id)).filter((n) => isFeatureAllowed(n.id));
 
-  const reloadProducts = () => axios.get(`${API}/products`).then(({ data }) => setProducts(data.map((p) => ({ ...p, id: p.id, price: Number(p.price), cost: Number(p.cost), stock: Number(p.stock) })))).catch(() => {});
+  const reloadProducts = () => {
+    const includeInactive = (session?.role === "Super Admin" || session?.role === "Admin") ? "?include_inactive=1" : "";
+    return axios.get(`${API}/products${includeInactive}`).then(({ data }) => setProducts(data.map((p) => ({ ...p, id: p.id, price: Number(p.price), cost: Number(p.cost), stock: Number(p.stock), is_active: p.is_active !== false })))).catch(() => {});
+  };
   const reloadMerchants = () => axios.get(`${API}/merchants`).then(({ data }) => setMerchants(data)).catch(() => {});
   const reloadExpenses = () => axios.get(`${API}/expenses`).then(({ data }) => setExpenses(data)).catch(() => {});
   const reloadShift = () => axios.get(`${API}/shifts/current`).then(({ data }) => setShift(data)).catch(() => setShift(null));
@@ -195,7 +198,7 @@ function AdminApp() {
   }, []);
 
   const filtered = useMemo(
-    () => products.filter((p) => (category === "Semua" || p.category === category) && p.name.toLowerCase().includes(query.toLowerCase())),
+    () => products.filter((p) => p.is_active !== false && (category === "Semua" || p.category === category) && p.name.toLowerCase().includes(query.toLowerCase())),
     [products, category, query]
   );
   const subtotal = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
@@ -541,10 +544,59 @@ function Overview({ products, expenses, setPage, activeOutlet }) {
   </>;
 }
 
+// -------- Pagination Helper --------
+const PAGE_SIZE = 12;
+
+function usePagination(items, deps = [], pageSize = PAGE_SIZE) {
+  const [page, setPage] = useState(1);
+  // Reset to page 1 whenever filter deps change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setPage(1); }, deps);
+  const totalPages = Math.max(1, Math.ceil((items?.length || 0) / pageSize));
+  const clampedPage = Math.min(page, totalPages);
+  const start = (clampedPage - 1) * pageSize;
+  const end = start + pageSize;
+  const pageItems = (items || []).slice(start, end);
+  return {
+    page: clampedPage, setPage, totalPages, pageItems,
+    start: items?.length ? start + 1 : 0,
+    end: Math.min(end, items?.length || 0),
+    total: items?.length || 0,
+  };
+}
+
+function PaginationBar({ page, setPage, totalPages, start, end, total, label = "produk", testid = "pagination" }) {
+  if (total === 0) return null;
+  // Build compact page window: [1] … [p-1] [p] [p+1] … [last]
+  const pages = [];
+  const push = (n) => { if (!pages.includes(n) && n >= 1 && n <= totalPages) pages.push(n); };
+  push(1);
+  for (let n = page - 1; n <= page + 1; n++) push(n);
+  push(totalPages);
+  pages.sort((a, b) => a - b);
+  const withEllipsis = [];
+  pages.forEach((n, i) => {
+    if (i > 0 && n - pages[i - 1] > 1) withEllipsis.push("…");
+    withEllipsis.push(n);
+  });
+  return <div className="pagination-bar" data-testid={testid}>
+    <span className="pg-info">Menampilkan <b>{start}-{end}</b> dari <b>{total}</b> {label}</span>
+    <div className="pg-controls">
+      <button className="pg-btn" disabled={page <= 1} onClick={() => setPage(page - 1)} data-testid={`${testid}-prev`}>‹ Sebelumnya</button>
+      {withEllipsis.map((n, i) => n === "…"
+        ? <span key={`e-${i}`} className="pg-ellipsis">…</span>
+        : <button key={n} className={`pg-num ${n === page ? "active" : ""}`} onClick={() => setPage(n)} data-testid={`${testid}-page-${n}`}>{n}</button>
+      )}
+      <button className="pg-btn" disabled={page >= totalPages} onClick={() => setPage(page + 1)} data-testid={`${testid}-next`}>Selanjutnya ›</button>
+    </div>
+  </div>;
+}
+
 // -------- POS --------
 function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, taxConfig, onPay, shift, role, onlineOrders, openOnline, openHistory }) {
   const locked = role === "Kasir" && !shift;
   const [variantPick, setVariantPick] = useState(null); // { product }
+  const pg = usePagination(products, [query, category, products.length]);
   const handleProductClick = (p) => {
     const active = (p.variants || []).filter((v) => v.active !== false);
     if (active.length > 0) setVariantPick(p);
@@ -568,12 +620,16 @@ function POS({ products, query, setQuery, category, setCategory, cart, addToCart
           <div className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cari menu atau scan barcode..." disabled={locked} data-testid="pos-product-search" /></div>
           <div className="category-tabs">{["Semua", "Kopi", "Makanan", "Snack", "Non-Kopi"].map((c) => <button className={category === c ? "selected" : ""} key={c} onClick={() => setCategory(c)} disabled={locked} data-testid={`category-${c.toLowerCase()}`}>{c}</button>)}</div>
         </div>
-        <div className="product-grid">
-          {products.map((p) => <button className="product-card" key={p.id} onClick={() => handleProductClick(p)} disabled={locked} data-testid={`product-card-${p.id}`}>
-            <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={30} />}<span>{p.stock} stok</span></div>
-            <div className="product-info"><b>{p.name}</b><span>{p.vendor}{(p.variants||[]).filter(v=>v.active!==false).length>0 && ` · ${(p.variants||[]).filter(v=>v.active!==false).length} varian`}</span><strong>{money(p.price)}</strong></div>
-            <div className="add-product"><Plus size={17} /></div>
-          </button>)}
+        <div className="menu-scroll" data-testid="pos-menu-scroll">
+          <div className="product-grid" data-testid="pos-product-grid">
+            {pg.total === 0 && <div className="empty-vendor" style={{ gridColumn: "1/-1" }} data-testid="pos-empty-menu"><Search size={26}/><b>Tidak ada menu</b><span>Ubah pencarian atau kategori</span></div>}
+            {pg.pageItems.map((p) => <button className="product-card" key={p.id} onClick={() => handleProductClick(p)} disabled={locked} data-testid={`product-card-${p.id}`}>
+              <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={30} />}<span>{p.stock} stok</span></div>
+              <div className="product-info"><b>{p.name}</b><span>{p.vendor}{(p.variants||[]).filter(v=>v.active!==false).length>0 && ` · ${(p.variants||[]).filter(v=>v.active!==false).length} varian`}</span><strong>{money(p.price)}</strong></div>
+              <div className="add-product"><Plus size={17} /></div>
+            </button>)}
+          </div>
+          <PaginationBar {...pg} label="menu" testid="pos-pagination" />
         </div>
       </section>
       <aside className="cart-panel">
@@ -1096,23 +1152,110 @@ function ExpenseModal({ onClose, onSaved, session, shift }) {
 
 // -------- Products --------
 function Products({ products, merchants, reload, notify }) {
-  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: "", cost: "", stock: "", color: "#ffedd5", image_url: "", variants: [] });
-  const [editVariants, setEditVariants] = useState(null); // { productId, variants: [] }
+  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: "", cost: "", stock: "", sku: "", is_active: true, color: "#ffedd5", image_url: "", variants: [] });
+  const [editProduct, setEditProduct] = useState(null);
+  const [showImport, setShowImport] = useState(false);
+  const [search, setSearch] = useState("");
+  const [filterCat, setFilterCat] = useState("Semua");
+  const [filterMerchant, setFilterMerchant] = useState("Semua");
+  const [statusTab, setStatusTab] = useState("all"); // all | active | inactive
   useEffect(() => { if (!form.merchant_id && merchants.length) setForm((f) => ({ ...f, merchant_id: merchants[0].id })); }, [merchants]);
+
   const save = async () => {
     if (!form.name) return notify("Nama produk wajib diisi");
     const vendor = merchants.find((m) => m.id === form.merchant_id)?.name || "MJD Kupi";
     await axios.post(`${API}/products`, { ...form, vendor, price: Number(form.price) || 0, cost: Number(form.cost) || 0, stock: Number(form.stock) || 0, variants: form.variants || [] });
-    setForm({ ...form, name: "", price: "", cost: "", stock: "", image_url: "", variants: [] });
+    setForm({ ...form, name: "", price: "", cost: "", stock: "", sku: "", image_url: "", variants: [] });
     reload(); notify("Produk berhasil ditambahkan");
   };
   const handleImage = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setForm({ ...form, image_url: r.result }); r.readAsDataURL(f); };
   const addFormVariant = () => setForm({ ...form, variants: [...(form.variants || []), { name: "", price: Number(form.price) || 0, cost: Number(form.cost) || 0, active: true }] });
   const updFormVariant = (i, patch) => setForm({ ...form, variants: form.variants.map((v, idx) => idx === i ? { ...v, ...patch } : v) });
   const rmFormVariant = (i) => setForm({ ...form, variants: form.variants.filter((_, idx) => idx !== i) });
+
+  const toggleActive = async (p) => {
+    try {
+      await axios.put(`${API}/products/${p.id}`, { name: p.name, is_active: !(p.is_active !== false) });
+      notify(p.is_active !== false ? `"${p.name}" dinonaktifkan — hilang dari POS & self-order` : `"${p.name}" diaktifkan kembali`);
+      reload();
+    } catch (e) { notify("Gagal ubah status produk"); }
+  };
+
+  // Filters
+  const categories = useMemo(() => ["Semua", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean)))], [products]);
+  const filtered = useMemo(() => products.filter((p) => {
+    if (statusTab === "active" && p.is_active === false) return false;
+    if (statusTab === "inactive" && p.is_active !== false) return false;
+    if (filterCat !== "Semua" && p.category !== filterCat) return false;
+    if (filterMerchant !== "Semua" && p.merchant_id !== filterMerchant) return false;
+    if (search) {
+      const s = search.toLowerCase();
+      if (!p.name.toLowerCase().includes(s) && !(p.sku || "").toLowerCase().includes(s)) return false;
+    }
+    return true;
+  }), [products, search, filterCat, filterMerchant, statusTab]);
+  const counts = useMemo(() => ({
+    all: products.length,
+    active: products.filter((p) => p.is_active !== false).length,
+    inactive: products.filter((p) => p.is_active === false).length,
+  }), [products]);
+
+  // CSV Template & Export
+  const downloadCSVTemplate = () => {
+    const headers = ["nama_produk", "sku", "merchant_id", "kategori", "harga_jual", "hpp_per_porsi", "stok_awal", "outlet_id", "is_active"];
+    const example = ["Es Kopi Pandan", "KP-001", merchants[0]?.id || "m-barista", "Kopi", "25000", "12000", "50", "outlet-sudirman", "true"];
+    const csv = headers.join(",") + "\n" + example.map((v) => `"${v}"`).join(",");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "mjd-template-produk.csv";
+    a.click();
+    notify("Template CSV berhasil diunduh");
+  };
+  const exportCatalog = () => {
+    const rows = products.map((p) => ({
+      id: p.id, nama_produk: p.name, sku: p.sku || "", merchant_id: p.merchant_id || "",
+      kategori: p.category, harga_jual: p.price, hpp_per_porsi: p.cost, stok_awal: p.stock,
+      outlet_id: p.outlet_id || "outlet-sudirman", is_active: p.is_active !== false ? "true" : "false",
+      varian: (p.variants || []).length,
+      image_url: p.image_url ? "yes" : "",
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Katalog Produk");
+    XLSX.writeFile(wb, `mjd-catalog-${new Date().toISOString().slice(0,10)}.xlsx`);
+    notify(`${rows.length} produk diekspor ke Excel`);
+  };
+
   return <>
-    <SectionHeader eyebrow="CATALOG & COSTING" title="Produk & HPP" description="Bangun katalog menu dan jaga margin setiap porsi."
-      action={<button className="primary-btn" data-testid="new-product-button" onClick={() => document.querySelector("#new-product")?.focus()}><Plus size={16} /> Produk baru</button>} />
+    <SectionHeader eyebrow="CATALOG & COSTING" title="Produk & HPP" description="Bangun katalog menu, kelola varian, HPP, dan visibility ke POS/Self-Order."
+      action={<div className="row-gap">
+        <button className="outline-btn" onClick={downloadCSVTemplate} data-testid="download-csv-template-btn"><Download size={14}/> Unduh Template CSV</button>
+        <button className="outline-btn" onClick={exportCatalog} data-testid="export-catalog-btn"><FileSpreadsheet size={14}/> Export Data</button>
+        <button className="outline-btn" onClick={() => setShowImport(true)} data-testid="open-import-modal-btn"><Upload size={14}/> Import Produk</button>
+        <button className="primary-btn" data-testid="new-product-button" onClick={() => document.querySelector("#new-product")?.focus()}><Plus size={16} /> Produk baru</button>
+      </div>} />
+
+    {/* Sticky Search & Filter Bar */}
+    <div className="product-filter-bar" data-testid="product-filter-bar">
+      <div className="pf-search">
+        <Search size={16}/>
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari nama atau SKU produk..." data-testid="product-search-input" />
+      </div>
+      <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)} data-testid="filter-category-select">
+        {categories.map((c) => <option key={c} value={c}>{c === "Semua" ? "Semua Kategori" : c}</option>)}
+      </select>
+      <select value={filterMerchant} onChange={(e) => setFilterMerchant(e.target.value)} data-testid="filter-merchant-select">
+        <option value="Semua">Semua Merchant</option>
+        {merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+      </select>
+      <div className="pf-tabs">
+        <button className={statusTab === "all" ? "active" : ""} onClick={() => setStatusTab("all")} data-testid="status-tab-all">Semua ({counts.all})</button>
+        <button className={statusTab === "active" ? "active" : ""} onClick={() => setStatusTab("active")} data-testid="status-tab-active">Aktif ({counts.active})</button>
+        <button className={statusTab === "inactive" ? "active" : ""} onClick={() => setStatusTab("inactive")} data-testid="status-tab-inactive">Tidak Aktif ({counts.inactive})</button>
+      </div>
+    </div>
+
     <div className="product-form-v2 panel">
       <div className="form-heading"><div className="form-icon"><ClipboardList size={18} /></div><div><h2>Tambah menu cepat</h2><span>Bind ke merchant / tenant · unggah foto produk · varian harga</span></div></div>
       <div className="product-form-grid">
@@ -1124,6 +1267,7 @@ function Products({ products, merchants, reload, notify }) {
         </div>
         <div className="product-fields">
           <label className="field-lg"><span>Nama produk</span><input id="new-product" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Contoh: Es Kopi Pandan" data-testid="product-name-input" /></label>
+          <label><span>SKU / Barcode</span><input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} placeholder="KP-001" data-testid="product-sku-input" /></label>
           <label><span>Merchant</span><select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
           <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
           <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} onFocus={numOnFocus} placeholder="0" data-testid="product-price-input" /></label>
@@ -1150,25 +1294,200 @@ function Products({ products, merchants, reload, notify }) {
       </div>
       <button className="primary-btn full-row" onClick={save} data-testid="save-product-button"><Plus size={14}/> Simpan produk</button>
     </div>
+
+    {filtered.length === 0 && <div className="empty-vendor" data-testid="products-empty"><Package size={30}/><b>Tidak ada produk sesuai filter</b><span>Ubah pencarian atau tab status di atas</span></div>}
     <div className="catalog-grid">
-      {products.map((p) => <div className="catalog-item" key={p.id}>
-        <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={26} />}</div>
-        <div><b>{p.name}</b><span>{p.vendor} · {p.category}</span>
-          <small>Margin <strong>{p.price ? Math.round((1 - p.cost / p.price) * 100) : 0}%</strong> · Stok {p.stock}
-            {(p.variants || []).length > 0 && <em className="variant-chip"> · {p.variants.length} varian</em>}
-          </small>
-        </div>
-        <div className="cat-actions">
-          <button className="small-action" onClick={() => setEditVariants({ productId: p.id, name: p.name, variants: p.variants || [] })} data-testid={`edit-variants-${p.id}`}><Settings2 size={12}/> Varian</button>
-          <button className="more-btn" onClick={async () => { if (window.confirm(`Hapus ${p.name}?`)) { await axios.delete(`${API}/products/${p.id}`); reload(); notify("Produk dihapus"); } }} data-testid={`product-menu-${p.id}`}><Trash2 size={13} /></button>
-        </div>
-      </div>)}
+      {filtered.map((p) => {
+        const inactive = p.is_active === false;
+        return <div className={`catalog-item ${inactive ? "is-inactive" : ""}`} key={p.id} data-testid={`product-card-${p.id}`}>
+          <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={26} />}
+            {inactive && <span className="inactive-badge" data-testid={`inactive-badge-${p.id}`}>TIDAK AKTIF</span>}
+          </div>
+          <div><b>{p.name}</b><span>{p.vendor} · {p.category}{p.sku ? ` · SKU ${p.sku}` : ""}</span>
+            <small>Margin <strong>{p.price ? Math.round((1 - p.cost / p.price) * 100) : 0}%</strong> · Stok {p.stock}
+              {(p.variants || []).length > 0 && <em className="variant-chip"> · {p.variants.length} varian</em>}
+            </small>
+          </div>
+          <div className="cat-actions">
+            <label className="switch is-active-switch" title={inactive ? "Aktifkan produk" : "Nonaktifkan produk"} data-testid={`toggle-active-${p.id}`}>
+              <input type="checkbox" checked={!inactive} onChange={() => toggleActive(p)} />
+              <i />
+            </label>
+            <button className="small-action" onClick={() => setEditProduct(p)} data-testid={`edit-product-${p.id}`}><Pencil size={12}/> Edit</button>
+            <button className="more-btn" onClick={async () => { if (window.confirm(`Hapus ${p.name}?`)) { await axios.delete(`${API}/products/${p.id}`); reload(); notify("Produk dihapus"); } }} data-testid={`product-menu-${p.id}`}><Trash2 size={13} /></button>
+          </div>
+        </div>;
+      })}
     </div>
-    {editVariants && <VariantEditModal product={editVariants} onClose={() => setEditVariants(null)} onSaved={() => { setEditVariants(null); reload(); notify("Varian tersimpan"); }} />}
+    {editProduct && <ProductEditModal product={editProduct} merchants={merchants} onClose={() => setEditProduct(null)} onSaved={() => { setEditProduct(null); reload(); notify("Produk tersimpan"); }} notify={notify} />}
+    {showImport && <BulkImportModal merchants={merchants} onClose={() => setShowImport(false)} onDone={(msg) => { setShowImport(false); reload(); notify(msg); }} />}
   </>;
 }
 
+function ProductEditModal({ product, merchants, onClose, onSaved, notify }) {
+  const [form, setForm] = useState({
+    name: product.name || "",
+    sku: product.sku || "",
+    category: product.category || "Kopi",
+    merchant_id: product.merchant_id || (merchants[0]?.id || ""),
+    price: product.price || 0,
+    cost: product.cost || 0,
+    stock: product.stock || 0,
+    is_active: product.is_active !== false,
+    color: product.color || "#ffedd5",
+    image_url: product.image_url || "",
+    variants: (product.variants || []).map((v) => ({ ...v })),
+  });
+  const [saving, setSaving] = useState(false);
+  const handleImage = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setForm({ ...form, image_url: r.result }); r.readAsDataURL(f); };
+  const addV = () => setForm({ ...form, variants: [...form.variants, { name: "", price: Number(form.price) || 0, cost: Number(form.cost) || 0, active: true }] });
+  const updV = (i, patch) => setForm({ ...form, variants: form.variants.map((v, idx) => idx === i ? { ...v, ...patch } : v) });
+  const rmV = (i) => setForm({ ...form, variants: form.variants.filter((_, idx) => idx !== i) });
+  const save = async () => {
+    if (!form.name) return notify("Nama produk wajib diisi");
+    setSaving(true);
+    try {
+      const vendor = merchants.find((m) => m.id === form.merchant_id)?.name || "MJD Kupi";
+      await axios.put(`${API}/products/${product.id}`, { ...form, vendor, price: Number(form.price) || 0, cost: Number(form.cost) || 0, stock: Number(form.stock) || 0, variants: form.variants });
+      onSaved();
+    } catch (e) { notify(e.response?.data?.detail || "Gagal simpan produk"); }
+    setSaving(false);
+  };
+  return <div className="modal-backdrop"><div className="pay-modal wide" data-testid="product-edit-modal">
+    <button className="modal-close" onClick={onClose}><X size={18}/></button>
+    <div className="pay-head"><h2>Edit Produk</h2><span>{product.name}{product.sku ? ` · SKU ${product.sku}` : ""}</span></div>
+    <div className="product-form-grid" style={{ marginTop: 8 }}>
+      <div className="product-image-picker">
+        <label className="image-drop" data-testid="edit-product-image-label">
+          {form.image_url ? <img src={form.image_url} alt="preview" /> : <><ImageIcon size={30}/><span>Unggah foto baru</span></>}
+          <input type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} data-testid="edit-product-image-input" />
+        </label>
+        <label className="switch-lg" style={{ marginTop: 12 }} data-testid="edit-is-active-wrapper">
+          <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} data-testid="edit-is-active-toggle" />
+          <i />
+          <span>{form.is_active ? "AKTIF (tampil di POS & Self-Order)" : "TIDAK AKTIF (disembunyikan)"}</span>
+        </label>
+      </div>
+      <div className="product-fields">
+        <label className="field-lg"><span>Nama produk</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="edit-product-name-input" /></label>
+        <label><span>SKU / Barcode</span><input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} data-testid="edit-product-sku-input" /></label>
+        <label><span>Merchant</span><select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="edit-product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+        <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="edit-product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
+        <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} onFocus={numOnFocus} data-testid="edit-product-price-input" /></label>
+        <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} onFocus={numOnFocus} data-testid="edit-product-cost-input" /></label>
+        <label><span>Stok</span><input type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} onFocus={numOnFocus} data-testid="edit-product-stock-input" /></label>
+      </div>
+    </div>
+    <div className="variant-editor" data-testid="edit-variant-editor">
+      <div className="ve-head"><b>Varian Produk</b><span>Kelola opsi: Size, Suhu, Topping</span>
+        <button className="outline-btn" type="button" onClick={addV} data-testid="edit-add-variant-btn"><Plus size={13}/> Tambah Varian</button>
+      </div>
+      {form.variants.length > 0 && <div className="ve-rows">
+        <div className="ve-row ve-label"><span>Nama Varian</span><span>Harga</span><span>HPP</span><span>Aktif</span><span/></div>
+        {form.variants.map((v, i) => <div className="ve-row" key={i}>
+          <input value={v.name} onChange={(e) => updV(i, { name: e.target.value })} data-testid={`edit-var-name-${i}`}/>
+          <input type="number" value={v.price} onChange={(e) => updV(i, { price: Number(e.target.value) })} onFocus={numOnFocus} data-testid={`edit-var-price-${i}`}/>
+          <input type="number" value={v.cost} onChange={(e) => updV(i, { cost: Number(e.target.value) })} onFocus={numOnFocus} data-testid={`edit-var-cost-${i}`}/>
+          <label className="switch"><input type="checkbox" checked={v.active !== false} onChange={(e) => updV(i, { active: e.target.checked })} data-testid={`edit-var-active-${i}`} /><i/></label>
+          <button className="icon-danger" type="button" onClick={() => rmV(i)} data-testid={`edit-var-remove-${i}`}><Trash2 size={13}/></button>
+        </div>)}
+      </div>}
+      {form.variants.length === 0 && <div className="empty-hint">Belum ada varian. Klik "Tambah Varian" untuk mulai.</div>}
+    </div>
+    <div className="modal-actions">
+      <button className="outline-btn" onClick={onClose}>Batal</button>
+      <button className="primary-btn" onClick={save} disabled={saving} data-testid="save-edit-product-btn"><Check size={14}/> {saving ? "Menyimpan…" : "Simpan Perubahan"}</button>
+    </div>
+  </div></div>;
+}
+
+function BulkImportModal({ merchants, onClose, onDone }) {
+  const [rows, setRows] = useState([]);
+  const [errors, setErrors] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [fileName, setFileName] = useState("");
+
+  const parseFile = async (file) => {
+    setFileName(file.name);
+    setErrors([]);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+      const seenSku = new Set();
+      const dedup = [];
+      const errs = [];
+      raw.forEach((r, i) => {
+        const name = String(r.nama_produk || r.name || r.Nama || "").trim();
+        const sku = String(r.sku || r.SKU || "").trim();
+        if (!name) { errs.push({ row: i + 2, error: "nama_produk kosong" }); return; }
+        if (sku && seenSku.has(sku)) { errs.push({ row: i + 2, error: `SKU duplikat: ${sku}` }); return; }
+        if (sku) seenSku.add(sku);
+        const isActiveRaw = String(r.is_active ?? "true").toLowerCase();
+        dedup.push({
+          id: r.id || null,
+          name,
+          sku,
+          category: String(r.kategori || r.category || "Lain-lain"),
+          merchant_id: r.merchant_id || null,
+          outlet_id: r.outlet_id || "outlet-sudirman",
+          price: Number(r.harga_jual || r.price || r.Harga || 0),
+          cost: Number(r.hpp_per_porsi || r.cost || r.HPP || 0),
+          stock: Number(r.stok_awal || r.stock || r.Stok || 0),
+          is_active: !(isActiveRaw === "false" || isActiveRaw === "0" || isActiveRaw === "tidak"),
+          color: r.color || "#ffedd5",
+        });
+      });
+      setRows(dedup); setErrors(errs);
+    } catch (e) { setErrors([{ row: 0, error: "Gagal parsing file: " + e.message }]); }
+  };
+
+  const upload = async () => {
+    if (!rows.length) return;
+    setUploading(true);
+    try {
+      const { data } = await axios.post(`${API}/products/bulk-import`, { rows, mode: "upsert" });
+      onDone(`Import selesai: ${data.created} baru, ${data.updated} diperbarui, ${(data.errors?.length || 0) + errors.length} error`);
+    } catch (e) { setErrors([{ row: 0, error: e.response?.data?.detail || "Upload gagal" }]); }
+    setUploading(false);
+  };
+
+  return <div className="modal-backdrop"><div className="pay-modal wide" data-testid="bulk-import-modal">
+    <button className="modal-close" onClick={onClose}><X size={18}/></button>
+    <div className="pay-head"><h2>Import Produk (Bulk)</h2><span>Upload file .csv / .xlsx / .xls — auto dedup by SKU</span></div>
+    <div className="excel-card" style={{ padding: 20, border: "1px dashed #e5e7eb", borderRadius: 12, margin: "12px 0" }}>
+      <label className="primary-btn" data-testid="bulk-import-file-label" style={{ display: "inline-flex" }}>
+        <Upload size={14}/> Pilih File
+        <input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files?.[0] && parseFile(e.target.files[0])} style={{ display: "none" }} data-testid="bulk-import-file-input"/>
+      </label>
+      {fileName && <span style={{ marginLeft: 12, color: "#6b7280", fontSize: 13 }}>{fileName} · <b>{rows.length}</b> baris valid{errors.length ? ` · ${errors.length} error` : ""}</span>}
+    </div>
+    {rows.length > 0 && <div className="data-table" style={{ maxHeight: 260, overflowY: "auto" }} data-testid="bulk-import-preview">
+      <div className="table-row table-label"><span>Nama</span><span>SKU</span><span>Kategori</span><span>Harga</span><span>HPP</span><span>Stok</span><span>Status</span></div>
+      {rows.slice(0, 20).map((r, i) => <div className="table-row" key={i}>
+        <span><b>{r.name}</b></span>
+        <span><small>{r.sku || "—"}</small></span>
+        <span>{r.category}</span>
+        <span>{money(r.price)}</span>
+        <span>{money(r.cost)}</span>
+        <span>{r.stock}</span>
+        <span><span className="method-badge" style={{ background: r.is_active ? "#dcfce7" : "#fee2e2", color: r.is_active ? "#166534" : "#991b1b" }}>{r.is_active ? "Aktif" : "Nonaktif"}</span></span>
+      </div>)}
+      {rows.length > 20 && <div className="empty-hint">…dan {rows.length - 20} baris lainnya</div>}
+    </div>}
+    {errors.length > 0 && <div className="empty-hint" data-testid="bulk-import-errors" style={{ background: "#fef2f2", color: "#991b1b" }}>
+      <b>{errors.length} error terdeteksi:</b>
+      <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>{errors.slice(0, 5).map((er, i) => <li key={i}>Baris {er.row}: {er.error}</li>)}</ul>
+    </div>}
+    <div className="modal-actions">
+      <button className="outline-btn" onClick={onClose}>Batal</button>
+      <button className="primary-btn" onClick={upload} disabled={!rows.length || uploading} data-testid="bulk-import-submit-btn"><Upload size={14}/> {uploading ? "Mengunggah…" : `Import ${rows.length} Produk`}</button>
+    </div>
+  </div></div>;
+}
+
 function VariantEditModal({ product, onClose, onSaved }) {
+  // Deprecated: kept for backward compatibility; use ProductEditModal for full edit
   const [rows, setRows] = useState(product.variants || []);
   const add = () => setRows([...rows, { name: "", price: 0, cost: 0, active: true }]);
   const upd = (i, patch) => setRows(rows.map((v, idx) => idx === i ? { ...v, ...patch } : v));
@@ -2444,6 +2763,7 @@ function CustomerSelfOrder() {
   // Categories
   const cats = ["Semua", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean)))];
   const filtered = products.filter((p) => (category === "Semua" || p.category === category) && (!query || p.name.toLowerCase().includes(query.toLowerCase())));
+  const pg = usePagination(filtered, [query, category, filtered.length], 12);
   const itemCount = cart.reduce((a, i) => a + i.qty, 0);
   const activeOutletName = availableOutlets.find((o) => o.id === outletId)?.name || outletId;
 
@@ -2529,22 +2849,25 @@ function CustomerSelfOrder() {
       </div>
     </div>
     {/* Product list */}
-    <div className="csa-list">
-      {filtered.map((p) => {
-        const priceLabel = (p.variants||[]).filter(v=>v.active!==false).length > 0 ? `Mulai ${money(Math.min(...p.variants.filter(v=>v.active!==false).map(v=>v.price)))}` : money(p.price);
-        return <div key={p.id} className="csa-item" data-testid={`csa-item-${p.id}`}>
-          <div className="csa-item-img" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name}/> : <Coffee size={30}/>}</div>
-          <div className="csa-item-info">
-            <b>{p.name}</b>
-            <span className="csa-vendor">by {p.vendor}</span>
-            <div className="csa-item-foot">
-              <strong>{priceLabel}</strong>
-              <button className="csa-add-btn" onClick={() => handleProductClick(p)} data-testid={`csa-add-${p.id}`}><Plus size={14}/> Tambah</button>
+    <div className="csa-scroll" data-testid="csa-product-scroll">
+      <div className="csa-list">
+        {pg.pageItems.map((p) => {
+          const priceLabel = (p.variants||[]).filter(v=>v.active!==false).length > 0 ? `Mulai ${money(Math.min(...p.variants.filter(v=>v.active!==false).map(v=>v.price)))}` : money(p.price);
+          return <div key={p.id} className="csa-item" data-testid={`csa-item-${p.id}`}>
+            <div className="csa-item-img" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name}/> : <Coffee size={30}/>}</div>
+            <div className="csa-item-info">
+              <b>{p.name}</b>
+              <span className="csa-vendor">by {p.vendor}</span>
+              <div className="csa-item-foot">
+                <strong>{priceLabel}</strong>
+                <button className="csa-add-btn" onClick={() => handleProductClick(p)} data-testid={`csa-add-${p.id}`}><Plus size={14}/> Tambah</button>
+              </div>
             </div>
-          </div>
-        </div>;
-      })}
-      {filtered.length === 0 && <div className="csa-empty">Tidak ada menu yang cocok.</div>}
+          </div>;
+        })}
+        {filtered.length === 0 && <div className="csa-empty">Tidak ada menu yang cocok.</div>}
+      </div>
+      <PaginationBar {...pg} label="menu" testid="csa-pagination" />
     </div>
     {/* Floating bottom cart */}
     {itemCount > 0 && <div className="csa-float" data-testid="customer-cart-bar">
