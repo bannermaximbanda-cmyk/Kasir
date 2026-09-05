@@ -140,10 +140,18 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - [x] **Preventive**: Extracted `PENDING_SELF_ORDER_STATUSES` shared constant untuk mencegah divergensi status filter di masa depan
 - [x] **Dual action buttons**: [Tolak Pesanan] + [Terima & Kirim ke Dapur] di modal Pesanan Online
 
+### Iteration 18 (Feb 2026 — Concurrency Guard Multi-Click)
+- [x] **BUG FIX (double-click duplicate transactions)**: Race condition di accept/reject endpoint dieliminasi
+- [x] **Atomic UPDATE ... WHERE status IN pending** — hanya 1 dari 5 concurrent request menang; sisanya 409 "double-click terblokir"
+- [x] **Rollback pada shift-closed error**: status kembali ke "Pesanan Diterima" sehingga kasir bisa retry setelah buka shift
+- [x] **Frontend instant lock**: `processing[id]` state + optimistic hide (order hilang dari UI sebelum response) + spinner "Memproses…" pada tombol
+- [x] **Reject guard tightened**: `.notin_(["Ditolak","Selesai","Diterima","Diproses","processing"])` mencegah reject atas order yang sudah accepted
+- [x] **Testing_agent iter18**: 4/4 concurrency test PASSED — 5 parallel accept via `threading.Barrier` → exactly 1×200 + 4×409 + 1 Sale row
+
 ## Testing status
-- **iter17**: 7/7 backend + 83/83 regression = **90/90 total** semua LULUS
-- **RCA confirmed by testing_agent**: Backend selalu benar (zero divergence antara /notifications & /pos/online-orders). Bug murni di frontend polling.
-- **Frontend**: verified via screenshot — modal Pesanan Online menampilkan 13 antrean termasuk #A0927BDB dengan highlight flash
+- **iter18**: 4/4 concurrency backend PASSED (multi-thread atomic guard verified) + regression 83/83 baseline
+- **Cumulative**: **94/94 total** (semua iter10-18)
+- **Frontend**: verified via screenshot — button disabled state + spinner + optimistic remove
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.

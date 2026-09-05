@@ -1278,18 +1278,24 @@ async def reject_self_order(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
 ):
-    """Kasir menolak pesanan online — status jadi 'Ditolak'."""
-    result = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
-    order = result.scalar_one_or_none()
-    if not order:
-        raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
-    if order.status in ("Ditolak", "Selesai"):
-        raise HTTPException(status_code=400, detail=f"Pesanan sudah {order.status}")
-    order.status = "Ditolak"
+    """Kasir menolak pesanan online — atomic transition ke 'Ditolak' (dupe-safe)."""
     reason = (payload.reason or "").strip() if payload else ""
-    order.notes = (order.notes or "") + f" [Ditolak: {reason or 'tanpa alasan'}]"
+    reject_note = f" [Ditolak: {reason or 'tanpa alasan'}]"
+    # Atomic — only orders NOT yet finalized can be rejected
+    upd = await db.execute(
+        M.SelfOrder.__table__.update()
+        .where(M.SelfOrder.id == order_id)
+        .where(M.SelfOrder.status.notin_(["Ditolak", "Selesai", "Diterima", "Diproses", "processing"]))
+        .values(status="Ditolak", notes=(M.SelfOrder.notes.op("||")(reject_note)))
+    )
     await db.commit()
-    return {"ok": True, "id": order.id, "status": order.status}
+    if upd.rowcount == 0:
+        r = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
+        existing = r.scalar_one_or_none()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
+        raise HTTPException(status_code=409, detail=f"Pesanan sudah {existing.status} (double-click terblokir)")
+    return {"ok": True, "id": order_id, "status": "Ditolak"}
 
 
 @api_router.post("/self-order/{order_id}/accept")
@@ -1298,13 +1304,31 @@ async def accept_self_order(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
 ):
-    """Kasir menyetujui pesanan online: buat sale, kurangi stok, buat KDS tickets."""
+    """Kasir menyetujui pesanan online: buat sale, kurangi stok, buat KDS tickets.
+
+    ATOMIC GUARD (Feb 2026): pakai UPDATE ... WHERE status IN pending-set → transitional 'processing'.
+    Jika 0 rows affected, request kedua/dupe langsung 409 Conflict tanpa duplikasi Sale.
+    """
+    # Atomic status transition: pending → processing (only 1 request wins)
+    upd = await db.execute(
+        M.SelfOrder.__table__.update()
+        .where(M.SelfOrder.id == order_id)
+        .where(M.SelfOrder.status.in_(["Menunggu kasir", "Menunggu konfirmasi", "Pesanan Diterima"]))
+        .values(status="processing")
+    )
+    await db.commit()
+    if upd.rowcount == 0:
+        # Either not found OR already processed by concurrent request
+        r = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
+        existing = r.scalar_one_or_none()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
+        raise HTTPException(status_code=409, detail=f"Pesanan sudah {existing.status} (double-click terblokir)")
+    # Now we own the lock — reload the order
     result = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
-    if order.status not in ("Menunggu kasir", "Menunggu konfirmasi", "Pesanan Diterima"):
-        raise HTTPException(status_code=400, detail=f"Pesanan sudah {order.status}")
 
     shift_id = None
     if user.role == "Kasir":
@@ -1313,6 +1337,9 @@ async def accept_self_order(
         )
         shift = active.scalar_one_or_none()
         if not shift:
+            # Rollback the lock so kasir can retry after opening shift
+            order.status = "Pesanan Diterima"
+            await db.commit()
             raise HTTPException(status_code=400, detail="Buka shift terlebih dahulu")
         shift_id = shift.id
 

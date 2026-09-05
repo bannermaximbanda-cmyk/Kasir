@@ -1911,50 +1911,87 @@ function ShiftReportModal({ report, onClose, notify, outlets }) {
 
 // -------- Online Orders Modal (POS) --------
 function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
+  const [processing, setProcessing] = useState({}); // {orderId: 'accepting' | 'rejecting'}
+  const [hidden, setHidden] = useState(new Set());  // optimistic hidden IDs
   const accept = async (id) => {
+    if (processing[id] || hidden.has(id)) return; // idempotent guard
+    setProcessing((p) => ({ ...p, [id]: "accepting" }));
+    setHidden((s) => new Set([...s, id])); // optimistic remove
     try {
       await axios.post(`${API}/self-order/${id}/accept`);
       notify("Pesanan diterima & masuk KDS");
       reload();
       onAcceptDone?.();
     } catch (e) {
-      notify(e.response?.data?.detail || "Gagal menerima pesanan");
+      const detail = e.response?.data?.detail || "Gagal menerima pesanan";
+      const status = e.response?.status;
+      if (status === 409) {
+        notify("⚠️ Pesanan sudah diproses (double-click terblokir)");
+      } else {
+        // rollback optimistic hide on real error (not 409 dupe)
+        setHidden((s) => { const n = new Set(s); n.delete(id); return n; });
+        notify(detail);
+      }
+    } finally {
+      setProcessing((p) => { const c = { ...p }; delete c[id]; return c; });
     }
   };
   const reject = async (id) => {
+    if (processing[id] || hidden.has(id)) return;
     const reason = window.prompt("Alasan penolakan (opsional):", "Stok habis");
     if (reason === null) return;
+    setProcessing((p) => ({ ...p, [id]: "rejecting" }));
+    setHidden((s) => new Set([...s, id]));
     try {
       await axios.post(`${API}/self-order/${id}/reject`, { reason });
       notify("Pesanan ditolak"); reload();
-    } catch (e) { notify(e.response?.data?.detail || "Gagal menolak"); }
+    } catch (e) {
+      const status = e.response?.status;
+      if (status === 409) {
+        notify("⚠️ Pesanan sudah diproses");
+      } else {
+        setHidden((s) => { const n = new Set(s); n.delete(id); return n; });
+        notify(e.response?.data?.detail || "Gagal menolak");
+      }
+    } finally {
+      setProcessing((p) => { const c = { ...p }; delete c[id]; return c; });
+    }
   };
+  const visible = orders.filter((o) => !hidden.has(o.id));
   return <div className="modal-backdrop">
     <div className="online-modal" data-testid="online-orders-modal">
       <button className="modal-close" onClick={onClose}><X size={18} /></button>
-      <div className="pay-head"><h2>Pesanan masuk (QR Meja)</h2><span>{orders.length} antrean · terima untuk lanjut ke dapur</span></div>
+      <div className="pay-head"><h2>Pesanan masuk (QR Meja)</h2><span>{visible.length} antrean · terima untuk lanjut ke dapur</span></div>
       <div className="online-list">
-        {orders.length === 0 && <div className="empty-cart"><QrCode size={30} /><b>Belum ada pesanan online</b><span>Pesanan self-order akan muncul di sini secara realtime (polling 4s)</span></div>}
-        {orders.map((o) => <div className="online-item" key={o.id} data-testid={`online-item-${o.id}`}>
-          <div className="online-item-head">
-            <div>
-              <b>{o.table_no}</b>
-              <span className="mono">#{String(o.id).slice(0, 8).toUpperCase()}</span>
-              {o.customer_name && <em className="cust-badge">👤 {o.customer_name}{o.customer_phone && ` · ${o.customer_phone}`}</em>}
+        {visible.length === 0 && <div className="empty-cart"><QrCode size={30} /><b>Belum ada pesanan online</b><span>Pesanan self-order akan muncul di sini secara realtime (polling 4s)</span></div>}
+        {visible.map((o) => {
+          const state = processing[o.id];
+          const busy = Boolean(state);
+          return <div className={`online-item ${busy ? "busy" : ""}`} key={o.id} data-testid={`online-item-${o.id}`}>
+            <div className="online-item-head">
+              <div>
+                <b>{o.table_no}</b>
+                <span className="mono">#{String(o.id).slice(0, 8).toUpperCase()}</span>
+                {o.customer_name && <em className="cust-badge">👤 {o.customer_name}{o.customer_phone && ` · ${o.customer_phone}`}</em>}
+              </div>
+              <strong>{money(o.total)}</strong>
             </div>
-            <strong>{money(o.total)}</strong>
-          </div>
-          <ul className="online-lines">{(o.lines || []).map((ln, i) => <li key={i}>
-            <b>{ln.quantity}×</b> {ln.name}{ln.variant_name && <em className="var-chip"> {ln.variant_name}</em>}
-            {ln.notes && <small className="line-note"> · 📝 {ln.notes}</small>}
-            <em>{money(ln.price * ln.quantity)}</em>
-          </li>)}</ul>
-          {o.payment_proof && <div className="proof-thumb"><img src={o.payment_proof} alt="proof" /><small>Bukti pembayaran</small></div>}
-          <div className="online-actions">
-            <button className="danger-btn" onClick={() => reject(o.id)} data-testid={`reject-online-${o.id}`}><X size={13}/> Tolak Pesanan</button>
-            <button className="primary-btn" onClick={() => accept(o.id)} data-testid={`accept-online-${o.id}`}><Check size={14}/> Terima & Kirim ke Dapur</button>
-          </div>
-        </div>)}
+            <ul className="online-lines">{(o.lines || []).map((ln, i) => <li key={i}>
+              <b>{ln.quantity}×</b> {ln.name}{ln.variant_name && <em className="var-chip"> {ln.variant_name}</em>}
+              {ln.notes && <small className="line-note"> · 📝 {ln.notes}</small>}
+              <em>{money(ln.price * ln.quantity)}</em>
+            </li>)}</ul>
+            {o.payment_proof && <div className="proof-thumb"><img src={o.payment_proof} alt="proof" /><small>Bukti pembayaran</small></div>}
+            <div className="online-actions">
+              <button className="danger-btn" onClick={() => reject(o.id)} disabled={busy} data-testid={`reject-online-${o.id}`}>
+                {state === "rejecting" ? <><RefreshCw size={13} className="spin"/> Memproses…</> : <><X size={13}/> Tolak Pesanan</>}
+              </button>
+              <button className="primary-btn" onClick={() => accept(o.id)} disabled={busy} data-testid={`accept-online-${o.id}`}>
+                {state === "accepting" ? <><RefreshCw size={14} className="spin"/> Memproses…</> : <><Check size={14}/> Terima & Kirim ke Dapur</>}
+              </button>
+            </div>
+          </div>;
+        })}
       </div>
     </div>
   </div>;
