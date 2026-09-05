@@ -94,6 +94,7 @@ export function twoCol(left, right, width = 32) {
 /** Build ESC/POS byte payload for a POS sale receipt. */
 export function buildSaleReceipt({ outlet, sale, cashier, width = 32 }) {
   const parts = [];
+  const cfg = outlet.printer_config || {};
   parts.push(new Uint8Array(escpos.init()));
   parts.push(new Uint8Array(escpos.setAlign(align.center)));
   parts.push(new Uint8Array(escpos.double(true)));
@@ -101,6 +102,10 @@ export function buildSaleReceipt({ outlet, sale, cashier, width = 32 }) {
   parts.push(new Uint8Array(escpos.double(false)));
   if (outlet.address) parts.push(escpos.text(`${outlet.address}\n`));
   if (outlet.phone) parts.push(escpos.text(`Telp: ${outlet.phone}\n`));
+  // Custom header lines from Printer Settings
+  if (cfg.header && String(cfg.header).trim()) {
+    for (const ln of String(cfg.header).split("\n")) if (ln.trim()) parts.push(escpos.text(`${ln}\n`));
+  }
   parts.push(new Uint8Array(escpos.setAlign(align.left)));
   parts.push(escpos.line(width));
   const dt = sale.created_at ? new Date(sale.created_at) : new Date();
@@ -126,8 +131,13 @@ export function buildSaleReceipt({ outlet, sale, cashier, width = 32 }) {
   if (sale.payment_reference) parts.push(escpos.text(twoCol("Ref", String(sale.payment_reference).slice(0, 16), width)));
   parts.push(new Uint8Array(escpos.feed(1)));
   parts.push(new Uint8Array(escpos.setAlign(align.center)));
-  parts.push(escpos.text("Terima kasih atas kunjungan Anda!\n"));
-  parts.push(escpos.text("~ MJD Kupi ~\n"));
+  // Custom footer lines (fallback to default if empty)
+  if (cfg.footer && String(cfg.footer).trim()) {
+    for (const ln of String(cfg.footer).split("\n")) if (ln.trim()) parts.push(escpos.text(`${ln}\n`));
+  } else {
+    parts.push(escpos.text("Terima kasih atas kunjungan Anda!\n"));
+    parts.push(escpos.text(`~ ${outlet.brand_name || "MJD Kupi"} ~\n`));
+  }
   parts.push(new Uint8Array(escpos.feed(3)));
   parts.push(new Uint8Array(escpos.cut()));
   return build(...parts);

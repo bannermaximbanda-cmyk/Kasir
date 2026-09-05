@@ -161,7 +161,27 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - **Cumulative**: **101/94+ total** (iter10-19)
 - **Frontend**: verified via screenshot — Inventory tabs (Stok/Mutasi/Excel) + Settlement per-merchant + Payout Ledger + PayoutConfirm modal + SoundSettings switch
 
-## Iteration 22 (Feb 2026 — Dynamic Branding Text + Real-Time Feature Access Control)
+## Iteration 23 (Feb 2026 — Printer Customization + Merchant Fixed Commission + PIN Feature Toggle)
+- [x] **Printer Settings — Kustomisasi Struk**: Panel baru "Kustomisasi Struk" dengan:
+  - Logo upload (PNG/JPG) → auto-resize + threshold @128 grayscale → **monokrom bitmap** siap ESC/POS
+  - Rekomendasi label dinamis: "Maks lebar 384px (58mm) / 576px (80mm)" mengikuti pilihan kertas
+  - Header Struk textarea (alamat, telp, WiFi) & Footer Struk textarea (thank you, IG)
+  - Disimpan sebagai `Setting.printer_config = {logo_url, logo_w, logo_h, header, footer}`
+  - `buildSaleReceipt()` di `thermalPrinter.js` sekarang menyisipkan header custom setelah nama outlet & footer custom sebelum cut (fallback ke default)
+- [x] **Merchant Commission Scheme Selector**: Form Tambah + White-Label Modal keduanya punya:
+  - Dropdown Tipe Komisi: `Persentase (%)` | `Nominal Tetap (Rp / item)`
+  - Conditional field: `commission_percent` atau `commission_fixed`
+  - Preview live "10% dari harga jual" atau "Rp 1.000 / item"
+  - Kolom tabel Merchant: "Skema Komisi" menampilkan format sesuai type
+  - Backend settlement `_compute_settlement_breakdown` sudah honoring scheme (verified: 193 items × Rp 2.000 = Rp 386.000 exact)
+- [x] **PIN Menu Standalone + Feature Toggle**:
+  - `<PinGenerator/>` dipindah ke User & Security page paling atas (prominent section)
+  - Tetap muncul juga di Pengaturan Sistem untuk backward compat
+  - `FEATURE_LIST` tambah entry `cashier_pin` — Super Admin bisa disable per role/outlet dari Feature Access Control
+  - Panel `pin-generator-panel` menampilkan badge merah "🔒 Modul Dinonaktifkan" + tombol disabled saat toggle off
+  - Prop `pinDisabled={!isFeatureAllowed("cashier_pin")}` diteruskan real-time ke both PinGenerator instance
+
+
 - [x] **Dynamic Branding Text (Nama + Subtitle)**: `<BrandingTextSettings/>` component di Pengaturan Sistem (Super Admin only) dengan input Nama Usaha & Subtitle/Tagline + preview live. Disimpan sebagai `Setting.branding_text = {name, subtitle}`.
 - [x] **Dynamic rendering**: Sidebar brand-text, topbar breadcrumb, dan login screen (nama + tagline uppercase + tombol "Masuk ke {brand}") semuanya membaca `brandingText` state — di-fetch pada mount + auto-update via `onBrandingTextSaved` callback tanpa reload.
 - [x] **Fix Feature Toggle Bug #1 (Key Mismatch)**: `FEATURE_LIST` diselaraskan dengan `NAV_ITEMS` id (`self-service`, `vendor-center`, dst) + tambah entry `overview` & `printer` yang sebelumnya hilang. Sekarang toggle benar-benar match saat filter sidebar.

@@ -363,12 +363,12 @@ function AdminApp() {
           {page === "products" && <Products products={products} merchants={merchants} reload={reloadProducts} notify={notify} />}
           {page === "merchants" && <Merchants merchants={merchants} reload={reloadMerchants} notify={notify} />}
           {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} />}
-          {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} />}
+          {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} pinDisabled={!isFeatureAllowed("cashier_pin")} />}
           {page === "reports" && <Reports products={products} expenses={expenses} />}
           {page === "tables" && <Tables notify={notify} activeOutlet={activeOutlet} branding={branding} />}
           {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} outlets={outlets} />}
           {page === "vendor-center" && <VendorCenter notify={notify} />}
-          {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} role={session.role} brandingText={brandingText} onBrandingTextSaved={(v) => setBrandingText(v)} onFeatureToggleSaved={() => axios.get(`${API}/feature-toggles`).then(({ data }) => setFeatureMatrix(data?.matrix || {})).catch(() => {})} />}
+          {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} role={session.role} brandingText={brandingText} onBrandingTextSaved={(v) => setBrandingText(v)} pinDisabled={!isFeatureAllowed("cashier_pin")} onFeatureToggleSaved={() => axios.get(`${API}/feature-toggles`).then(({ data }) => setFeatureMatrix(data?.matrix || {})).catch(() => {})} />}
           {page === "printer" && <PrinterSettings notify={notify} />}
         </div>
         {showNotif && <NotificationDrawer notif={notifications} onClose={() => setShowNotif(false)}
@@ -1525,7 +1525,7 @@ function VariantEditModal({ product, onClose, onSaved }) {
 
 // -------- Merchants --------
 function Merchants({ merchants, reload, notify }) {
-  const [form, setForm] = useState({ name: "", category: "F&B", commission_percent: 10, phone: "", color: "#ffedd5" });
+  const [form, setForm] = useState({ name: "", category: "F&B", commission_scheme: "percent", commission_percent: 10, commission_fixed: 1000, phone: "", color: "#ffedd5" });
   const [editing, setEditing] = useState(null);
   const save = async () => {
     if (!form.name) return notify("Nama merchant wajib diisi");
@@ -1534,30 +1534,39 @@ function Merchants({ merchants, reload, notify }) {
     reload(); notify("Merchant terdaftar");
   };
   const remove = async (m) => { if (!window.confirm(`Hapus merchant ${m.name}?`)) return; try { await axios.delete(`${API}/merchants/${m.id}`); reload(); notify("Merchant dihapus"); } catch (e) { notify(e.response?.data?.detail || "Gagal menghapus"); } };
+  const commissionLabel = (m) => m.commission_scheme === "fixed" ? `${money(m.commission_fixed || 0)} / item` : `${m.commission_percent}%`;
   return <>
-    <SectionHeader eyebrow="TENANT & WHITE-LABEL" title="Merchant & Mitra Toko" description="Kelola mitra, komisi, branding kustom, dan status langganan SaaS."
+    <SectionHeader eyebrow="TENANT & WHITE-LABEL" title="Merchant & Mitra Toko" description="Kelola mitra, komisi (Persentase / Nominal Tetap), branding kustom, dan status langganan SaaS."
       action={<div className="live-pill"><i /> {merchants.length} tenant aktif</div>} />
     <div className="product-form panel">
-      <div className="form-heading"><div className="form-icon"><Store size={18} /></div><div><h2>Tambah merchant / tenant</h2><span>Setelah tersimpan, klik "Edit White-Label" untuk konfigurasi identitas mitra.</span></div></div>
-      <div className="form-fields">
-        <label>Nama<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="merchant-name-input" /></label>
-        <label>Kategori<select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="merchant-category-select">{["F&B", "Kopi", "Makanan", "Snack", "Minuman"].map((c) => <option key={c}>{c}</option>)}</select></label>
-        <label>Komisi %<input type="number" value={form.commission_percent} onChange={(e) => setForm({ ...form, commission_percent: Number(e.target.value) })} onFocus={numOnFocus} data-testid="merchant-commission-input" /></label>
-        <label>WhatsApp (628…)<input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} data-testid="merchant-phone-input" /></label>
+      <div className="form-heading"><div className="form-icon"><Store size={18} /></div><div><h2>Tambah merchant / tenant</h2><span>Skema komisi berlaku otomatis di Vendor Settlement Center.</span></div></div>
+      <div className="form-fields" style={{ gridTemplateColumns: "1.4fr 1fr 1fr 1.2fr 1.2fr auto" }}>
+        <label><span>Nama</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="merchant-name-input" /></label>
+        <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="merchant-category-select">{["F&B", "Kopi", "Makanan", "Snack", "Minuman"].map((c) => <option key={c}>{c}</option>)}</select></label>
+        <label><span>Skema Komisi</span>
+          <select value={form.commission_scheme} onChange={(e) => setForm({ ...form, commission_scheme: e.target.value })} data-testid="merchant-scheme-select">
+            <option value="percent">Persentase (%)</option>
+            <option value="fixed">Nominal Tetap (Rp)</option>
+          </select>
+        </label>
+        {form.commission_scheme === "fixed"
+          ? <label><span>Nilai (Rp / item)</span><input type="number" value={form.commission_fixed} onChange={(e) => setForm({ ...form, commission_fixed: Number(e.target.value) })} onFocus={numOnFocus} placeholder="1000" data-testid="merchant-commission-fixed-input"/></label>
+          : <label><span>Persentase (%)</span><input type="number" value={form.commission_percent} onChange={(e) => setForm({ ...form, commission_percent: Number(e.target.value) })} onFocus={numOnFocus} placeholder="10" data-testid="merchant-commission-input"/></label>}
+        <label><span>WhatsApp (628…)</span><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} data-testid="merchant-phone-input" /></label>
         <button className="primary-btn" onClick={save} data-testid="save-merchant-button">Simpan</button>
       </div>
     </div>
     <section className="panel table-panel">
       <div className="panel-head"><div><h2>Merchant terdaftar</h2><span>Klik "White-Label" untuk custom branding, subscription, & feature access</span></div></div>
       <div className="data-table">
-        <div className="table-row wl-row table-label"><span>Merchant</span><span>Kategori</span><span>Komisi</span><span>Slug/Domain</span><span>Subscription</span><span>Status</span><span /></div>
+        <div className="table-row wl-row table-label"><span>Merchant</span><span>Kategori</span><span>Skema Komisi</span><span>Slug/Domain</span><span>Subscription</span><span>Status</span><span /></div>
         {merchants.map((m) => <div className="table-row wl-row" key={m.id} data-testid={`merchant-row-${m.id}`}>
           <span className="table-product">
             <div className="product-dot" style={{ background: m.theme_color || m.color || "#ffedd5" }}>{m.logo_url ? <img src={m.logo_url} alt="" style={{width:22,height:22,borderRadius:6}}/> : <Store size={14} />}</div>
             <b>{m.name}</b>
           </span>
           <span>{m.category}</span>
-          <span>{m.commission_percent}%</span>
+          <span><b>{commissionLabel(m)}</b><small style={{ display: "block", color: "#6b7280" }}>{m.commission_scheme === "fixed" ? "Flat fee" : "Persentase"}</small></span>
           <span className="mono-small">{m.slug ? `${m.slug}.mjdkupi.com` : "—"}</span>
           <span><i className={`status-dot ${m.subscription_status === "active" ? "good" : m.subscription_status === "suspended" ? "low" : "warn"}`} />{m.subscription_status || "active"}</span>
           <span><i className={`status-dot ${m.active ? "good" : "low"}`} />{m.active ? "Aktif" : "Nonaktif"}</span>
@@ -1576,7 +1585,9 @@ function WhiteLabelModal({ merchant, onClose, onSaved }) {
   const [f, setF] = useState({
     name: merchant.name || "",
     category: merchant.category || "F&B",
+    commission_scheme: merchant.commission_scheme || "percent",
     commission_percent: merchant.commission_percent || 10,
+    commission_fixed: merchant.commission_fixed || 1000,
     phone: merchant.phone || "",
     color: merchant.color || "#ffedd5",
     active: merchant.active !== false,
@@ -1637,6 +1648,21 @@ function WhiteLabelModal({ merchant, onClose, onSaved }) {
           <label>Header Struk<textarea rows={2} value={f.receipt_header} onChange={(e) => setF({ ...f, receipt_header: e.target.value })} placeholder="Alamat, No. Telp"/></label>
           <label>Footer Struk<textarea rows={2} value={f.receipt_footer} onChange={(e) => setF({ ...f, receipt_footer: e.target.value })} placeholder="Terima kasih atas kunjungannya"/></label>
           <label>Password Wi-Fi<input value={f.wifi_password} onChange={(e) => setF({ ...f, wifi_password: e.target.value })} placeholder="kopi123"/></label>
+        </div>
+        <div className="wl-section">
+          <b>Skema Komisi Platform</b>
+          <label>Tipe Komisi
+            <select value={f.commission_scheme} onChange={(e) => setF({ ...f, commission_scheme: e.target.value })} data-testid="wl-scheme-select">
+              <option value="percent">Persentase (%) — cocok untuk margin tinggi</option>
+              <option value="fixed">Nominal Tetap (Rp) — cocok untuk item volume</option>
+            </select>
+          </label>
+          {f.commission_scheme === "fixed"
+            ? <label>Nilai per Item Terjual (Rp)<input type="number" value={f.commission_fixed} onChange={(e) => setF({ ...f, commission_fixed: Number(e.target.value) })} onFocus={numOnFocus} placeholder="1000" data-testid="wl-commission-fixed"/></label>
+            : <label>Persentase (%)<input type="number" value={f.commission_percent} onChange={(e) => setF({ ...f, commission_percent: Number(e.target.value) })} onFocus={numOnFocus} placeholder="10" data-testid="wl-commission-percent"/></label>}
+          <div className="empty-hint" style={{ background: "#fff7ed", color: "#9a3412", margin: 0 }}>
+            Preview: <b>{f.commission_scheme === "fixed" ? `${money(f.commission_fixed || 0)} / item` : `${f.commission_percent || 0}% dari harga jual`}</b>
+          </div>
         </div>
         <div className="wl-section">
           <b>Subscription / Masa Aktif</b>
@@ -1981,7 +2007,7 @@ function PayoutConfirmModal({ entry, period, onClose, onConfirm }) {
 }
 
 // -------- Settings (Printer + Branding + Outlets, Super Admin only) --------
-function SettingsPage({ notify, role, brandingText, onBrandingTextSaved, onFeatureToggleSaved }) {
+function SettingsPage({ notify, role, brandingText, onBrandingTextSaved, onFeatureToggleSaved, pinDisabled }) {
   const [printer, setPrinter] = useState({ size: "58mm", auto_print: true, split_kitchen: true, device: "Bluetooth" });
   const [logo, setLogo] = useState("");
   const [outlets, setOutlets] = useState([]);
@@ -2075,7 +2101,7 @@ function SettingsPage({ notify, role, brandingText, onBrandingTextSaved, onFeatu
     {(role === "Super Admin" || role === "Admin") && <PaymentSettings notify={notify} />}
     {(role === "Super Admin" || role === "Admin") && <TaxSettings notify={notify} />}
     {(role === "Super Admin" || role === "Admin") && <SoundSettings notify={notify} />}
-    {(role === "Super Admin" || role === "Admin") && <PinGenerator notify={notify} />}
+    {(role === "Super Admin" || role === "Admin") && <PinGenerator notify={notify} disabled={pinDisabled} />}
     {isSuper && <FeatureToggleMatrix notify={notify} outlets={outlets} onSaved={onFeatureToggleSaved} />}
   </>;
 }
@@ -2219,6 +2245,7 @@ const FEATURE_LIST = [
   { key: "users", label: "User & Security" },
   { key: "printer", label: "Pengaturan Printer" },
   { key: "settings", label: "Pengaturan Sistem" },
+  { key: "cashier_pin", label: "Kode Otorisasi Kasir (PIN)" },
 ];
 
 function FeatureToggleMatrix({ notify, outlets, onSaved }) {
@@ -2323,7 +2350,7 @@ function PaymentSettings({ notify }) {
 }
 
 // -------- PIN Generator (rolling 15 min) --------
-function PinGenerator({ notify }) {
+function PinGenerator({ notify, disabled }) {
   const [pin, setPin] = useState("");
   const [expires, setExpires] = useState("");
   const [remaining, setRemaining] = useState(0);
@@ -2334,26 +2361,27 @@ function PinGenerator({ notify }) {
     if (diff <= 0) setPin("");
   }, 1000); return () => clearInterval(t); }, [expires]);
   const generate = async () => {
+    if (disabled) return notify("Kode Otorisasi Kasir dinonaktifkan oleh Super Admin (Feature Access Control)");
     try { const { data } = await axios.post(`${API}/admin/pin/generate`); setPin(data.pin); setExpires(data.expires_at); notify("Kode otorisasi baru dibuat, berlaku 15 menit"); }
     catch { notify("Gagal generate PIN"); }
   };
-  return <section className="panel product-form-v2">
-    <div className="form-heading"><div className="form-icon"><Shield size={18} /></div><div><h2>Kode Otorisasi Kasir (15 menit)</h2><span>Untuk approve pembatalan / edit transaksi</span></div></div>
+  return <section className={`panel product-form-v2 ${disabled ? "panel-disabled" : ""}`} data-testid="pin-generator-panel">
+    <div className="form-heading"><div className="form-icon"><Shield size={18} /></div><div><h2>Kode Otorisasi Kasir (15 menit)</h2><span>{disabled ? "🔒 Modul dinonaktifkan — atur di Feature Access Control" : "Untuk approve pembatalan / edit transaksi kasir"}</span></div></div>
     <div className="pin-display" data-testid="pin-display">
       {pin ? <>
         <code className="pin-code" data-testid="pin-code">{pin}</code>
         <div className="pin-meta">
           <span>Berlaku {Math.floor(remaining / 60)}m {String(remaining % 60).padStart(2, "0")}s</span>
-          <button className="outline-btn" onClick={generate} data-testid="regenerate-pin-button"><RefreshCw size={12}/> Generate ulang</button>
+          <button className="outline-btn" onClick={generate} disabled={disabled} data-testid="regenerate-pin-button"><RefreshCw size={12}/> Generate ulang</button>
         </div>
       </> : <>
-        <div className="hint">Belum ada kode aktif</div>
-        <button className="primary-btn" onClick={generate} data-testid="generate-pin-button"><Shield size={14}/> Generate PIN</button>
+        <div className="hint">{disabled ? "PIN otorisasi kasir dinonaktifkan" : "Belum ada kode aktif"}</div>
+        <button className="primary-btn" onClick={generate} disabled={disabled} data-testid="generate-pin-button"><Shield size={14}/> Generate PIN</button>
       </>}
     </div>
   </section>;
 }
-function UserManagement({ notify }) {
+function UserManagement({ notify, pinDisabled }) {
   const [users, setUsers] = useState([]);
   const [outlets, setOutlets] = useState([]);
   const [reveal, setReveal] = useState({});
@@ -2376,8 +2404,9 @@ function UserManagement({ notify }) {
   const toggle = async (id) => { await axios.patch(`${API}/admin/users/${id}/toggle`); load(); };
   const remove = async (u) => { if (!window.confirm(`Hapus user ${u.name}?`)) return; try { await axios.delete(`${API}/admin/users/${u.id}`); load(); notify("User dihapus"); } catch (e) { notify(e.response?.data?.detail || "Gagal"); } };
   return <>
-    <SectionHeader eyebrow="SECURITY · SUPER ADMIN" title="Manajemen User & Security" description="Kelola akun, reset password, lihat kredensial semua user."
+    <SectionHeader eyebrow="SECURITY · SUPER ADMIN" title="Manajemen User & Security" description="Kelola akun, reset password, kode otorisasi kasir, dan kredensial user."
       action={<div className="live-pill"><i /> {users.length} akun aktif</div>} />
+    <PinGenerator notify={notify} disabled={pinDisabled} />
     <div className="panel product-form-v2">
       <div className="form-heading"><div className="form-icon"><Shield size={18} /></div><div><h2>Tambah user baru</h2><span>Password akan disimpan agar Super Admin dapat memulihkannya</span></div></div>
       <div className="form-fields" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr auto" }}>
@@ -3153,9 +3182,16 @@ function PrinterSettings({ notify }) {
   const [name, setName] = useState(pairedPrinterName() || "");
   const [paper, setPaper] = useState(() => { try { return localStorage.getItem("mjd_paper_size") || "80mm"; } catch { return "80mm"; } });
   const [alloc, setAlloc] = useState(() => { try { return localStorage.getItem("mjd_printer_role") || "cashier"; } catch { return "cashier"; } });
+  const [cfg, setCfg] = useState({ logo_url: "", header: "", footer: "" });
+  const [savingCfg, setSavingCfg] = useState(false);
   const supported = isPrinterSupported();
   useEffect(() => { try { localStorage.setItem("mjd_paper_size", paper); } catch {} }, [paper]);
   useEffect(() => { try { localStorage.setItem("mjd_printer_role", alloc); } catch {} }, [alloc]);
+  useEffect(() => {
+    axios.get(`${API}/settings/printer_config`).then(({ data }) => {
+      if (data && typeof data === "object") setCfg((c) => ({ ...c, ...data }));
+    }).catch(() => {});
+  }, []);
   const pair = async () => {
     try {
       const dev = await pairPrinter();
@@ -3169,12 +3205,55 @@ function PrinterSettings({ notify }) {
         merchant: "MJD Kupi", outlet: "Test Print", cashier: "System",
         lines: [{ name: "Test Print", quantity: 1, price: 0 }],
         subtotal: 0, tax: 0, total: 0, method: "TEST", change: 0, cash: 0,
+        header: cfg.header, footer: cfg.footer,
       }, paper));
       notify("Test print terkirim ke printer");
     } catch (e) { notify(`Gagal test print: ${e.message || e}`); }
   };
+  // Convert uploaded image to monochrome dataURL bounded to paper width
+  const handleLogoUpload = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const targetWidth = paper === "58mm" ? 384 : 576;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const ratio = Math.min(1, targetWidth / img.width);
+        const w = Math.round(img.width * ratio);
+        const h = Math.round(img.height * ratio);
+        const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        // white background then draw
+        ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h);
+        // Simple threshold @128 → monochrome
+        for (let i = 0; i < data.data.length; i += 4) {
+          const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
+          const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+          const v = gray < 128 ? 0 : 255;
+          data.data[i] = v; data.data[i + 1] = v; data.data[i + 2] = v; data.data[i + 3] = 255;
+        }
+        ctx.putImageData(data, 0, 0);
+        const url = canvas.toDataURL("image/png");
+        setCfg((c) => ({ ...c, logo_url: url, logo_w: w, logo_h: h }));
+        notify(`Logo diresize ${w}×${h}px & di-konversi monokrom`);
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  };
+  const saveCfg = async () => {
+    setSavingCfg(true);
+    try {
+      await axios.post(`${API}/settings`, { key: "printer_config", value: cfg });
+      notify("Konfigurasi struk tersimpan (header · footer · logo)");
+    } catch (e) { notify("Gagal simpan konfigurasi"); }
+    setSavingCfg(false);
+  };
+  const maxLogoWidth = paper === "58mm" ? 384 : 576;
   return <>
-    <SectionHeader eyebrow="HARDWARE" title="Pengaturan Printer" description="Konfigurasi printer thermal ESC/POS via Web Bluetooth. Set alokasi per role (Kasir / Dapur / Barista)."
+    <SectionHeader eyebrow="HARDWARE" title="Pengaturan Printer" description="Konfigurasi printer thermal ESC/POS + kustomisasi header, footer, dan logo struk."
       action={<button className="primary-btn" onClick={pair} data-testid="printer-pair-button" disabled={!supported}><Bluetooth size={14}/> Pair Printer</button>} />
     {!supported && <div className="warn-banner">⚠️ Web Bluetooth tidak didukung di browser ini. Gunakan Chrome/Edge di HTTPS.</div>}
     <div className="panel product-form-v2" data-testid="printer-settings">
@@ -3207,6 +3286,46 @@ function PrinterSettings({ notify }) {
         <button className="primary-btn" onClick={pair} data-testid="printer-repair-button"><RefreshCw size={14}/> {connected ? "Ganti Printer" : "Pair Sekarang"}</button>
       </div>
     </div>
+
+    {/* Receipt Customization */}
+    <div className="panel product-form-v2" data-testid="printer-receipt-panel">
+      <div className="form-heading"><div className="form-icon"><FileText size={18}/></div>
+        <div><h2>Kustomisasi Struk</h2><span>Logo, header, dan footer akan tercetak di setiap struk pelanggan</span></div>
+      </div>
+      <div className="printer-cust-grid" style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20 }}>
+        <div>
+          <label className="image-drop" data-testid="receipt-logo-label" style={{ minHeight: 160 }}>
+            {cfg.logo_url ? <img src={cfg.logo_url} alt="logo" style={{ maxWidth: "100%", maxHeight: 140, background: "#fff", padding: 8 }}/>
+                          : <><ImageIcon size={30}/><span>Klik untuk unggah logo struk</span></>}
+            <input type="file" accept="image/png,image/jpeg" onChange={handleLogoUpload} style={{ display: "none" }} data-testid="receipt-logo-input"/>
+          </label>
+          <div className="empty-hint" style={{ marginTop: 8, background: "#fff7ed", color: "#9a3412" }}>
+            <b>Rekomendasi:</b> Gambar Hitam-Putih / Monokrom.<br/>
+            Maks lebar: <b>{maxLogoWidth}px</b> untuk {paper}.<br/>
+            Sistem auto-resize & konversi monokrom.
+          </div>
+          {cfg.logo_url && <button className="outline-btn" style={{ width: "100%", marginTop: 8 }} onClick={() => setCfg({ ...cfg, logo_url: "" })} data-testid="remove-logo-btn"><Trash2 size={13}/> Hapus Logo</button>}
+        </div>
+        <div>
+          <label className="field-lg" style={{ marginBottom: 12, display: "block" }}>
+            <span>Header Struk</span>
+            <textarea rows={3} value={cfg.header} onChange={(e) => setCfg({ ...cfg, header: e.target.value })}
+              placeholder="Jl. Sudirman No. 1&#10;Telp: 0812-3456-7890&#10;WiFi: kopi123" data-testid="receipt-header-input"
+              style={{ width: "100%", padding: 10, border: "1px solid var(--line)", borderRadius: 6, fontFamily: "monospace", fontSize: 13 }} />
+          </label>
+          <label className="field-lg" style={{ marginBottom: 12, display: "block" }}>
+            <span>Footer Struk</span>
+            <textarea rows={3} value={cfg.footer} onChange={(e) => setCfg({ ...cfg, footer: e.target.value })}
+              placeholder="Terima kasih atas kunjungan Anda!&#10;IG: @mjdkupi&#10;#SegelasKopiSetiapHari" data-testid="receipt-footer-input"
+              style={{ width: "100%", padding: 10, border: "1px solid var(--line)", borderRadius: 6, fontFamily: "monospace", fontSize: 13 }} />
+          </label>
+          <div className="modal-actions">
+            <button className="primary-btn" onClick={saveCfg} disabled={savingCfg} data-testid="save-printer-config-btn"><Check size={14}/> {savingCfg ? "Menyimpan…" : "Simpan Konfigurasi Struk"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div className="panel product-form-v2">
       <div className="form-heading"><div className="form-icon"><Info size={18}/></div>
         <div><h2>Panduan Konfigurasi</h2><span>Tips agar cetakan struk & tiket dapur berjalan mulus</span></div>
