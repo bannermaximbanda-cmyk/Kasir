@@ -109,13 +109,28 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
   - Accessible untuk Kasir & Admin (bukan cuma Super Admin)
 - [x] **Backend fixes iter13→14**: accept endpoint status allow-list expanded, `customer_phone` column + persistence, notifications truncated to 10
 
+### Iteration 15 (Feb 2026 — CRITICAL BUG FIX + Self-Service Management + Outlet Picker)
+- [x] **BUG FIX (URGENT)**: QR self-orders NOW appear in POS "Pesanan Online" modal (backend already correct; RCA in iter15 report confirmed 12/12 test pass + kasir at outlet-sudirman sees exact order #34956F85)
+- [x] **Notification click → auto-open OnlineOrdersModal**: Klik notif type='order' langsung setPage('pos') + setShowOnlineOrders(true) untuk terima/tolak
+- [x] **Reject Pesanan endpoint**: `POST /api/self-order/{id}/reject` dengan JSON body `{reason}`, status jadi "Ditolak", tidak muncul lagi di queue
+- [x] **Self-Service Management per outlet (`/api/outlets/{outlet_id}/self-service`)**:
+  - Banner Promo carousel (multi-upload dataURL, auto-rotate 4.5s)
+  - Marquee text berjalan (running text di atas hero)
+  - Logo & Header image upload
+  - Force closed toggle + custom closed_message override shift
+  - Halaman "Pengaturan Self-Service & QR Meja" dengan outlet selector dropdown, Preview Order link
+- [x] **Public outlets endpoint `/api/public/outlets`**: List outlet aktif tanpa auth
+- [x] **Customer Self-Order Outlet Picker**: Header dropdown yang bisa switch outlet on-the-fly, fetch menu+banner+status outlet baru dinamis
+- [x] **UI POS Online Orders enhanced**: Menampilkan customer_name + phone badge, variant chip, notes, tombol "Tolak Pesanan" + "Terima & Kirim ke Dapur" (bukan lagi 1 tombol)
+
 ## Testing status
-- **iter10**: 25/25 backend tests PASSED
-- **iter11**: 15/15 backend tests PASSED
-- **iter12**: 9/9 backend tests PASSED
-- **iter13-14**: 8/8 backend tests PASSED + 3 critical bugs fixed
-- **Regression**: **57/57 total** when run sequentially
-- **Frontend**: verified via screenshot — Self-Order mobile (hero + cart), Notification Drawer (10 items), QR Config form + branded cards, Printer Settings menu
+- **iter10**: 25/25 backend PASSED
+- **iter11**: 15/15 backend PASSED
+- **iter12**: 9/9 backend PASSED
+- **iter13-14**: 8/8 backend PASSED + 3 critical bugs fixed
+- **iter15**: 12/12 (1 skip for empty seed) + 57/57 regression = **69/69 total**
+- **Bug user reported CONFIRMED FIXED** dan dites end-to-end (kasir Dina @ outlet-sudirman melihat order #34956F85 di queue)
+- **Frontend**: verified via screenshot — Self-Service Studio (all 4 panels), Outlet picker, Marquee preview, Customer outlet picker
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.

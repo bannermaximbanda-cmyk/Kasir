@@ -354,12 +354,15 @@ function AdminApp() {
           {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} />}
           {page === "reports" && <Reports products={products} expenses={expenses} />}
           {page === "tables" && <Tables notify={notify} activeOutlet={activeOutlet} branding={branding} />}
-          {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} />}
+          {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} outlets={outlets} />}
           {page === "vendor-center" && <VendorCenter notify={notify} />}
           {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} role={session.role} />}
           {page === "printer" && <PrinterSettings notify={notify} />}
         </div>
-        {showNotif && <NotificationDrawer notif={notifications} onClose={() => setShowNotif(false)} setPage={(p) => { setShowNotif(false); setPage(p); }} onMarkAll={() => setNotifications({ ...notifications, unread_count: 0 })} />}
+        {showNotif && <NotificationDrawer notif={notifications} onClose={() => setShowNotif(false)}
+          setPage={(p) => { setShowNotif(false); setPage(p); }}
+          onOrderClick={(o) => { setShowNotif(false); setPage("pos"); setShowOnlineOrders(true); }}
+          onMarkAll={() => setNotifications({ ...notifications, unread_count: 0 })} />}
       </main>
 
       {toast && <div className="toast" data-testid="toast-message"><span>✓</span>{toast}</div>}
@@ -1264,45 +1267,96 @@ function Tables({ notify, activeOutlet, branding }) {
   </>;
 }
 
-// -------- Self-service --------
-function SelfService({ products, notify, activeOutlet }) {
-  const [table, setTable] = useState("07");
-  const [cart, setCart] = useState([]);
-  const [qris, setQris] = useState("");
-  const total = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
-  const add = (p) => setCart((cur) => cur.find((i) => i.id === p.id) ? cur.map((i) => i.id === p.id ? { ...i, qty: i.qty + 1 } : i) : [...cur, { ...p, qty: 1 }]);
-  const send = async () => {
-    if (!cart.length) return;
-    try {
-      await axios.post(`${API}/self-order`, { table: `Meja ${table}`, lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id })), total, notes: "Self-service QR" });
-      notify("Pesanan terkirim ke kasir dan dapur");
-      setCart([]);
-    } catch { notify("Pesanan tersimpan sebagai antrean offline"); }
+// -------- Self-Service Management (per outlet banner, marquee, status) --------
+function SelfService({ products, notify, activeOutlet, outlets }) {
+  const validOutlets = (outlets && outlets.length ? outlets : [{ id: "outlet-sudirman", name: "Outlet Sudirman" }, { id: "outlet-kemang", name: "Outlet Kemang" }]);
+  const [pickOutlet, setPickOutlet] = useState(activeOutlet && activeOutlet !== "all" ? activeOutlet : validOutlets[0]?.id);
+  const [settings, setSettings] = useState({ banners: [], marquee_text: "", logo_url: "", header_image: "", force_closed: false, closed_message: "" });
+  const [loading, setLoading] = useState(false);
+  const [shiftOpen, setShiftOpen] = useState(false);
+  useEffect(() => {
+    if (!pickOutlet) return;
+    setLoading(true);
+    axios.get(`${API}/outlets/${pickOutlet}/self-service`).then(({ data }) => setSettings(data)).finally(() => setLoading(false)).catch(() => setLoading(false));
+    axios.get(`${API}/outlets/${pickOutlet}/shift-status`).then(({ data }) => setShiftOpen(!!data.open)).catch(() => {});
+  }, [pickOutlet]);
+  const upd = (patch) => setSettings((s) => ({ ...s, ...patch }));
+  const upload = (key) => (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => upd({ [key]: r.result }); r.readAsDataURL(f); };
+  const addBanner = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => upd({ banners: [...(settings.banners || []), r.result] }); r.readAsDataURL(f); };
+  const removeBanner = (i) => upd({ banners: settings.banners.filter((_, idx) => idx !== i) });
+  const save = async () => {
+    try { await axios.post(`${API}/outlets/${pickOutlet}/self-service`, settings); notify(`Konfigurasi ${validOutlets.find(o=>o.id===pickOutlet)?.name || pickOutlet} tersimpan`); }
+    catch (e) { notify(e.response?.data?.detail || "Gagal simpan"); }
   };
-  const saveQris = async () => { if (!qris) return notify("Masukkan kode QRIS terlebih dahulu"); try { await axios.post(`${API}/settings/qris`, { outlet_id: activeOutlet, qris_code: qris }); notify("Kode QRIS tersimpan"); } catch { notify("QRIS tersimpan lokal"); } };
+  const previewLink = `${ORIGIN}/self-order?table=05&outlet_id=${pickOutlet}`;
   return <>
-    <SectionHeader eyebrow="CUSTOMER SELF-ORDER" title="Self-service meja" description="Pelanggan scan QR, pilih menu, kirim pesanan tanpa antre."
-      action={<div className="live-pill"><i /> QR order aktif</div>} />
-    <div className="self-grid">
-      <section>
-        <div className="self-toolbar">
-          <label>Nomor meja<select value={table} onChange={(e) => setTable(e.target.value)} data-testid="self-table-select">{Array.from({ length: 30 }, (_, i) => <option key={i}>{String(i + 1).padStart(2, "0")}</option>)}</select></label>
-          <label>Kode QRIS<input value={qris} onChange={(e) => setQris(e.target.value)} placeholder="Tempel kode QRIS outlet" data-testid="qris-code-input" /></label>
-          <button className="outline-btn" data-testid="save-qris-button" onClick={saveQris}><QrCode size={15} /> Simpan QRIS</button>
+    <SectionHeader eyebrow="SELF-SERVICE STUDIO" title="Pengaturan Self-Service & QR Meja" description="Kelola banner, marquee, logo, dan status buka/tutup per outlet."
+      action={<div className="row-gap">
+        <label className="outlet-picker" data-testid="self-service-outlet-picker-wrap">
+          <Building2 size={14}/>
+          <select value={pickOutlet || ""} onChange={(e) => setPickOutlet(e.target.value)} data-testid="self-service-outlet-picker">
+            {validOutlets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+          </select>
+        </label>
+        <a className="outline-btn" href={previewLink} target="_blank" rel="noreferrer" data-testid="preview-self-order"><QrCode size={14}/> Preview Order</a>
+        <button className="primary-btn" onClick={save} disabled={loading} data-testid="save-self-service"><Check size={14}/> Simpan Pengaturan</button>
+      </div>} />
+    <div className="ss-grid">
+      <section className="panel ss-panel">
+        <div className="form-heading"><div className="form-icon"><StopCircle size={18}/></div>
+          <div><h2>Status Toko</h2><span>Shift kasir: <b className={shiftOpen ? "" : "danger"}>{shiftOpen ? "AKTIF (buka)" : "BELUM DIBUKA"}</b></span></div>
         </div>
-        <div className="self-products">
-          {products.map((p) => <button className="self-product" key={p.id} onClick={() => add(p)} data-testid={`self-product-${p.id}`}>
-            <div className="product-art" style={{ background: p.color }}><Coffee size={27} /></div>
-            <b>{p.name}</b><span>{money(p.price)} · {p.vendor}</span>
-          </button>)}
+        <div className="ss-status-row">
+          <label className="switch-lg">
+            <input type="checkbox" checked={settings.force_closed} onChange={(e) => upd({ force_closed: e.target.checked })} data-testid="ss-force-closed-toggle"/>
+            <i/>
+            <span>{settings.force_closed ? "TERPAKSA TUTUP" : "IKUTI SHIFT KASIR"}</span>
+          </label>
+          <label className="ss-full">Pesan penutupan (opsional)
+            <input value={settings.closed_message} onChange={(e) => upd({ closed_message: e.target.value })} placeholder="Contoh: Sedang cuti bersama, buka kembali besok pkl 08.00" data-testid="ss-closed-msg"/>
+          </label>
         </div>
       </section>
-      <aside className="self-cart panel">
-        <div className="panel-head"><div><h2>Meja {table}</h2><span>{cart.reduce((a, i) => a + i.qty, 0)} item</span></div><QrCode size={25} color="#f97316" /></div>
-        {cart.length ? cart.map((i) => <div className="self-line" key={i.id}><span>{i.qty}× {i.name}</span><b>{money(i.qty * i.price)}</b></div>) : <div className="empty-cart"><ShoppingCart size={25} /><b>Belum ada menu</b><span>Pilih menu di sebelah kiri</span></div>}
-        <div className="self-total"><span>Total</span><strong>{money(total)}</strong></div>
-        <button className="pay-btn" disabled={!cart.length} onClick={send} data-testid="send-self-order-button">Kirim pesanan <span>→</span></button>
-      </aside>
+      <section className="panel ss-panel">
+        <div className="form-heading"><div className="form-icon"><Store size={18}/></div>
+          <div><h2>Logo & Header</h2><span>Logo bulat di header + header image opsional</span></div>
+        </div>
+        <div className="ss-media-row">
+          <label className="ss-media">
+            <b>Logo Outlet</b>
+            {settings.logo_url ? <img src={settings.logo_url} alt="logo" className="ss-logo-preview"/> : <div className="ss-media-empty"><Store size={26}/></div>}
+            <input type="file" accept="image/*" onChange={upload("logo_url")} data-testid="ss-logo-input"/>
+          </label>
+          <label className="ss-media wide">
+            <b>Header Image (opsional)</b>
+            {settings.header_image ? <img src={settings.header_image} alt="header" className="ss-header-preview"/> : <div className="ss-media-empty"><ImageIcon size={26}/></div>}
+            <input type="file" accept="image/*" onChange={upload("header_image")} data-testid="ss-header-input"/>
+          </label>
+        </div>
+      </section>
+      <section className="panel ss-panel span-2">
+        <div className="form-heading"><div className="form-icon"><ImageIcon size={18}/></div>
+          <div><h2>Banner Promo (Carousel)</h2><span>Multi-banner untuk hero self-order · disarankan 1200×400px</span></div>
+        </div>
+        <div className="ss-banners">
+          {(settings.banners || []).map((b, i) => <div className="ss-banner-thumb" key={i}>
+            <img src={b} alt={`banner-${i}`}/>
+            <button className="icon-danger" onClick={() => removeBanner(i)} data-testid={`remove-banner-${i}`}><X size={13}/></button>
+          </div>)}
+          <label className="ss-banner-add">
+            <Plus size={20}/>
+            <span>Tambah Banner</span>
+            <input type="file" accept="image/*" onChange={addBanner} data-testid="add-banner-input"/>
+          </label>
+        </div>
+      </section>
+      <section className="panel ss-panel span-2">
+        <div className="form-heading"><div className="form-icon"><Bell size={18}/></div>
+          <div><h2>Marquee / Pengumuman Berjalan</h2><span>Teks berjalan di atas halaman self-order</span></div>
+        </div>
+        <input className="ss-marquee-input" value={settings.marquee_text} onChange={(e) => upd({ marquee_text: e.target.value })} placeholder="Contoh: 🎉 Diskon Kopi 20% s/d 20 Feb! · Menu baru: Kopi Pandan · Wi-Fi: kopi123" data-testid="ss-marquee-input"/>
+        {settings.marquee_text && <div className="ss-marquee-preview" data-testid="ss-marquee-preview"><div className="marquee-text">{settings.marquee_text} · {settings.marquee_text}</div></div>}
+      </section>
     </div>
   </>;
 }
@@ -1807,20 +1861,39 @@ function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
       notify(e.response?.data?.detail || "Gagal menerima pesanan");
     }
   };
+  const reject = async (id) => {
+    const reason = window.prompt("Alasan penolakan (opsional):", "Stok habis");
+    if (reason === null) return;
+    try {
+      await axios.post(`${API}/self-order/${id}/reject`, { reason });
+      notify("Pesanan ditolak"); reload();
+    } catch (e) { notify(e.response?.data?.detail || "Gagal menolak"); }
+  };
   return <div className="modal-backdrop">
     <div className="online-modal" data-testid="online-orders-modal">
       <button className="modal-close" onClick={onClose}><X size={18} /></button>
       <div className="pay-head"><h2>Pesanan masuk (QR Meja)</h2><span>{orders.length} antrean · terima untuk lanjut ke dapur</span></div>
       <div className="online-list">
-        {orders.length === 0 && <div className="empty-cart"><QrCode size={30} /><b>Belum ada pesanan online</b><span>Pesanan self-order akan muncul di sini secara realtime</span></div>}
+        {orders.length === 0 && <div className="empty-cart"><QrCode size={30} /><b>Belum ada pesanan online</b><span>Pesanan self-order akan muncul di sini secara realtime (polling 4s)</span></div>}
         {orders.map((o) => <div className="online-item" key={o.id} data-testid={`online-item-${o.id}`}>
           <div className="online-item-head">
-            <div><b>{o.table_no}</b><span className="mono">#{String(o.id).slice(-6)}</span></div>
+            <div>
+              <b>{o.table_no}</b>
+              <span className="mono">#{String(o.id).slice(0, 8).toUpperCase()}</span>
+              {o.customer_name && <em className="cust-badge">👤 {o.customer_name}{o.customer_phone && ` · ${o.customer_phone}`}</em>}
+            </div>
             <strong>{money(o.total)}</strong>
           </div>
-          <ul className="online-lines">{(o.lines || []).map((ln, i) => <li key={i}><b>{ln.quantity}×</b> {ln.name}<em>{money(ln.price * ln.quantity)}</em></li>)}</ul>
+          <ul className="online-lines">{(o.lines || []).map((ln, i) => <li key={i}>
+            <b>{ln.quantity}×</b> {ln.name}{ln.variant_name && <em className="var-chip"> {ln.variant_name}</em>}
+            {ln.notes && <small className="line-note"> · 📝 {ln.notes}</small>}
+            <em>{money(ln.price * ln.quantity)}</em>
+          </li>)}</ul>
           {o.payment_proof && <div className="proof-thumb"><img src={o.payment_proof} alt="proof" /><small>Bukti pembayaran</small></div>}
-          <button className="primary-btn full" onClick={() => accept(o.id)} data-testid={`accept-online-${o.id}`}><Check size={14}/> Setujui & kirim ke dapur</button>
+          <div className="online-actions">
+            <button className="danger-btn" onClick={() => reject(o.id)} data-testid={`reject-online-${o.id}`}><X size={13}/> Tolak Pesanan</button>
+            <button className="primary-btn" onClick={() => accept(o.id)} data-testid={`accept-online-${o.id}`}><Check size={14}/> Terima & Kirim ke Dapur</button>
+          </div>
         </div>)}
       </div>
     </div>
@@ -1866,10 +1939,15 @@ function CashierMonitor({ notify, onView }) {
 function CustomerSelfOrder() {
   const params = new URLSearchParams(window.location.search);
   const tableParam = params.get("table") || "01";
-  const outletId = params.get("outlet_id") || params.get("outlet") || "outlet-sudirman";
+  const initialOutlet = params.get("outlet_id") || params.get("outlet") || "outlet-sudirman";
+  const [outletId, setOutletId] = useState(initialOutlet);
+  const [availableOutlets, setAvailableOutlets] = useState([]);
+  const [showOutletPicker, setShowOutletPicker] = useState(false);
   const storeSlug = params.get("store_id") || "";
   const [products, setProducts] = useState([]);
   const [merchants, setMerchants] = useState([]);
+  const [ssSettings, setSsSettings] = useState({ banners: [], marquee_text: "", logo_url: "", force_closed: false, closed_message: "" });
+  const [bannerIdx, setBannerIdx] = useState(0);
   const [cart, setCart] = useState([]);
   const [step, setStep] = useState("menu"); // menu | pay | done | closed
   const [payMethod, setPayMethod] = useState("QRIS Toko");
@@ -1894,9 +1972,16 @@ function CustomerSelfOrder() {
   const total = subtotal + tax;
 
   useEffect(() => {
+    axios.get(`${API}/public/outlets`).then(({ data }) => setAvailableOutlets(data)).catch(() => {});
+  }, []);
+  useEffect(() => {
     axios.get(`${API}/outlets/${outletId}/shift-status`).then(({ data }) => {
       setShopOpen(!!data.open);
       if (!data.open) setShopMsg("Mohon Maaf, Toko Sedang Tutup / Belum Menerima Pesanan Online");
+    }).catch(() => {});
+    axios.get(`${API}/outlets/${outletId}/self-service`).then(({ data }) => {
+      setSsSettings(data);
+      if (data.force_closed) { setShopOpen(false); setShopMsg(data.closed_message || "Toko sementara tutup"); }
     }).catch(() => {});
     axios.get(`${API}/products?outlet_id=${outletId}`).then(({ data }) => setProducts(data)).catch(() => {});
     axios.get(`${API}/merchants`).then(({ data }) => setMerchants(data)).catch(() => {});
@@ -1907,7 +1992,14 @@ function CustomerSelfOrder() {
       setBranding(data);
       try { document.documentElement.style.setProperty("--brand-accent", data.theme_color || "#f97316"); } catch {}
     }).catch(() => {});
+    setCart([]); // reset cart when switching outlet
   }, [outletId, storeSlug]);
+  useEffect(() => {
+    // Banner carousel rotation
+    if (!ssSettings.banners || ssSettings.banners.length <= 1) return;
+    const t = setInterval(() => setBannerIdx((i) => (i + 1) % ssSettings.banners.length), 4500);
+    return () => clearInterval(t);
+  }, [ssSettings.banners]);
   useEffect(() => {
     if (step !== "done" || !orderId) return;
     const t = setInterval(async () => {
@@ -1915,6 +2007,10 @@ function CustomerSelfOrder() {
     }, 4000);
     return () => clearInterval(t);
   }, [step, orderId]);
+
+  const currentBanner = ssSettings.banners && ssSettings.banners.length > 0 ? ssSettings.banners[bannerIdx] : null;
+  const heroBg = currentBanner ? `url(${currentBanner})` : branding.banner_url ? `url(${branding.banner_url})` : "linear-gradient(135deg, var(--brand-accent) 0%, #fb923c 100%)";
+  const heroLogo = ssSettings.logo_url || branding.logo_url;
 
   const handleProductClick = (p) => {
     const active = (p.variants || []).filter((v) => v.active !== false);
@@ -1953,6 +2049,7 @@ function CustomerSelfOrder() {
   const cats = ["Semua", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean)))];
   const filtered = products.filter((p) => (category === "Semua" || p.category === category) && (!query || p.name.toLowerCase().includes(query.toLowerCase())));
   const itemCount = cart.reduce((a, i) => a + i.qty, 0);
+  const activeOutletName = availableOutlets.find((o) => o.id === outletId)?.name || outletId;
 
   if (!shopOpen) return <div className="csa" data-testid="customer-self-order">
     <div className="csa-topbar"><div className="csa-logo">{branding.logo_url ? <img src={branding.logo_url} alt=""/> : <Coffee size={20}/>}</div><b>{branding.name}</b></div>
@@ -2005,17 +2102,25 @@ function CustomerSelfOrder() {
   }
 
   return <div className="csa" data-testid="customer-self-order">
+    {ssSettings.marquee_text && <div className="csa-marquee" data-testid="csa-marquee"><div className="marquee-text">{ssSettings.marquee_text} · {ssSettings.marquee_text}</div></div>}
     {/* Hero header with banner */}
-    <div className="csa-hero" style={{ backgroundImage: branding.banner_url ? `url(${branding.banner_url})` : "linear-gradient(135deg, var(--brand-accent) 0%, #fb923c 100%)" }}>
+    <div className="csa-hero" style={{ backgroundImage: heroBg }}>
       <div className="csa-hero-overlay">
         <div className="csa-hero-badge">
-          <div className="csa-logo big">{branding.logo_url ? <img src={branding.logo_url} alt=""/> : <Coffee size={26}/>}</div>
+          <div className="csa-logo big">{heroLogo ? <img src={heroLogo} alt=""/> : <Coffee size={26}/>}</div>
           <div>
             <h1>{branding.name}</h1>
-            <span><MapPin size={11}/> Meja {tableParam} · <i className="live-dot"/> Buka - Menerima Pesanan</span>
+            <button className="csa-outlet-btn" onClick={() => setShowOutletPicker(true)} data-testid="csa-outlet-picker-button">
+              <MapPin size={11}/> <b>{activeOutletName}</b> · Meja {tableParam}
+              <ChevronDown size={11}/>
+            </button>
+            <span><i className="live-dot"/> Buka - Menerima Pesanan</span>
           </div>
         </div>
       </div>
+      {ssSettings.banners && ssSettings.banners.length > 1 && <div className="csa-hero-dots">
+        {ssSettings.banners.map((_, i) => <i key={i} className={i === bannerIdx ? "on" : ""}/>)}
+      </div>}
     </div>
     {/* Sticky search + categories */}
     <div className="csa-sticky">
@@ -2052,6 +2157,22 @@ function CustomerSelfOrder() {
     </div>}
     {/* Variant modal */}
     {variantPick && <CsaVariantModal product={variantPick} onClose={() => setVariantPick(null)} onAdd={(v, n) => { addToCart(variantPick, v, n); setVariantPick(null); }} />}
+    {/* Outlet picker modal */}
+    {showOutletPicker && <div className="csa-drawer-back" onClick={() => setShowOutletPicker(false)}>
+      <div className="csa-drawer" onClick={(e) => e.stopPropagation()} data-testid="csa-outlet-picker-modal">
+        <div className="csa-drawer-grabber"/>
+        <button className="csa-drawer-close" onClick={() => setShowOutletPicker(false)}><X size={20}/></button>
+        <h2>Pilih Outlet</h2>
+        <div className="csa-outlet-list">
+          {availableOutlets.map((o) => <button key={o.id} className={`csa-outlet-item ${o.id === outletId ? "active" : ""}`} onClick={() => { setOutletId(o.id); setShowOutletPicker(false); }} data-testid={`csa-outlet-${o.id}`}>
+            <MapPin size={16}/>
+            <div><b>{o.name}</b><span>{o.address || "—"}</span></div>
+            {o.id === outletId && <Check size={16} color="#059669"/>}
+          </button>)}
+          {availableOutlets.length === 0 && <div className="empty-hint">Belum ada outlet aktif</div>}
+        </div>
+      </div>
+    </div>}
     {/* Checkout drawer */}
     {showCheckout && <div className="csa-drawer-back" onClick={() => setShowCheckout(false)}>
       <div className="csa-drawer" onClick={(e) => e.stopPropagation()} data-testid="customer-checkout-drawer">
@@ -2220,13 +2341,17 @@ function Login({ onLogin }) {
 }
 
 // -------- Notification Drawer (Batch B #3) --------
-function NotificationDrawer({ notif, onClose, setPage, onMarkAll }) {
+function NotificationDrawer({ notif, onClose, setPage, onOrderClick, onMarkAll }) {
   const items = notif?.items || [];
-  const iconFor = (t) => t === "stock" ? Package : t === "shift" ? UserCheck : t === "order" ? ShoppingCart : Bell;
+  const iconFor = (t) => t === "stock" ? Package : t === "shift" ? UserCheck : t === "order" ? ShoppingCart : Info;
   const colorFor = (s) => s === "critical" ? "#ef4444" : s === "warning" ? "#f59e0b" : "#3b82f6";
   const timeAgo = (iso) => {
     const d = new Date(iso); const m = Math.max(0, Math.floor((Date.now() - d.getTime()) / 60000));
     if (m < 1) return "baru saja"; if (m < 60) return `${m}m lalu`; const h = Math.floor(m/60); if (h < 24) return `${h}j lalu`; return `${Math.floor(h/24)}h lalu`;
+  };
+  const handleClick = (n) => {
+    if (n.type === "order" && onOrderClick) onOrderClick(n);
+    else setPage(n.action || "overview");
   };
   return <div className="notif-back" onClick={onClose}>
     <aside className="notif-drawer" onClick={(e) => e.stopPropagation()} data-testid="notif-drawer">
@@ -2238,7 +2363,7 @@ function NotificationDrawer({ notif, onClose, setPage, onMarkAll }) {
         {items.length === 0 ? <div className="empty-hint" style={{padding: 40}}>Tidak ada notifikasi</div>
           : items.map((n) => {
             const Icon = iconFor(n.type);
-            return <button key={n.id} className={`notif-row ${n.severity}`} onClick={() => setPage(n.action || "overview")} data-testid={`notif-${n.id}`}>
+            return <button key={n.id} className={`notif-row ${n.severity}`} onClick={() => handleClick(n)} data-testid={`notif-${n.id}`}>
               <div className="notif-icon" style={{ background: `${colorFor(n.severity)}22`, color: colorFor(n.severity) }}><Icon size={16}/></div>
               <div className="notif-info">
                 <b>{n.title}</b>

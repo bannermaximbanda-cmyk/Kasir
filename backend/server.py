@@ -1204,6 +1204,89 @@ async def outlet_shift_status(outlet_id: str, db: AsyncSession = Depends(get_db)
     return {"outlet_id": outlet_id, "open": bool(shift), "cashier_name": shift.cashier_name if shift else ""}
 
 
+# -----------------------------------------------------------------------------
+# Self-Service Management (per outlet): banners, marquee, store status override
+# -----------------------------------------------------------------------------
+
+class SelfServiceSettingsInput(BaseModel):
+    banners: List[str] = []  # data URLs / http URLs
+    marquee_text: str = ""
+    logo_url: str = ""
+    header_image: str = ""
+    force_closed: bool = False  # admin override: force close regardless of shift
+    closed_message: str = ""
+
+
+@api_router.get("/outlets/{outlet_id}/self-service")
+async def get_self_service_settings(outlet_id: str, db: AsyncSession = Depends(get_db)):
+    """Public: settings displayed on the customer /self-order page for this outlet."""
+    key = f"self_service:{outlet_id}"
+    result = await db.execute(select(M.Setting).where(M.Setting.key == key))
+    row = result.scalar_one_or_none()
+    v = (row.value or {}) if row else {}
+    return {
+        "outlet_id": outlet_id,
+        "banners": v.get("banners", []),
+        "marquee_text": v.get("marquee_text", ""),
+        "logo_url": v.get("logo_url", ""),
+        "header_image": v.get("header_image", ""),
+        "force_closed": bool(v.get("force_closed", False)),
+        "closed_message": v.get("closed_message", ""),
+    }
+
+
+@api_router.post("/outlets/{outlet_id}/self-service")
+async def save_self_service_settings(
+    outlet_id: str,
+    payload: SelfServiceSettingsInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
+):
+    key = f"self_service:{outlet_id}"
+    result = await db.execute(select(M.Setting).where(M.Setting.key == key))
+    row = result.scalar_one_or_none()
+    value = payload.model_dump()
+    if row:
+        row.value = value
+        row.updated_at = datetime.now(timezone.utc)
+    else:
+        db.add(M.Setting(key=key, value=value))
+    await db.commit()
+    return {"ok": True, "outlet_id": outlet_id, **value}
+
+
+# Public outlets listing (for customer self-order to switch)
+@api_router.get("/public/outlets")
+async def public_outlets(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(M.Outlet).where(M.Outlet.active == True).order_by(M.Outlet.name))
+    return [{"id": o.id, "name": o.name, "address": o.address} for o in result.scalars().all()]
+
+
+class RejectReasonInput(BaseModel):
+    reason: str = ""
+
+
+@api_router.post("/self-order/{order_id}/reject")
+async def reject_self_order(
+    order_id: str,
+    payload: RejectReasonInput = RejectReasonInput(),
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
+):
+    """Kasir menolak pesanan online — status jadi 'Ditolak'."""
+    result = await db.execute(select(M.SelfOrder).where(M.SelfOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
+    if order.status in ("Ditolak", "Selesai"):
+        raise HTTPException(status_code=400, detail=f"Pesanan sudah {order.status}")
+    order.status = "Ditolak"
+    reason = (payload.reason or "").strip() if payload else ""
+    order.notes = (order.notes or "") + f" [Ditolak: {reason or 'tanpa alasan'}]"
+    await db.commit()
+    return {"ok": True, "id": order.id, "status": order.status}
+
+
 @api_router.post("/self-order/{order_id}/accept")
 async def accept_self_order(
     order_id: str,
