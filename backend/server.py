@@ -41,6 +41,8 @@ class MerchantInput(BaseModel):
     name: str
     category: str = "F&B"
     commission_percent: float = 10.0
+    commission_scheme: str = "percent"
+    commission_fixed: float = 0.0
     phone: str = ""
     color: str = "#ffedd5"
     active: bool = True
@@ -696,13 +698,18 @@ async def adjust_stock(
     # Outlet isolation: non-super admin can only adjust products of their outlet
     if user.role != "Super Admin" and product.outlet_id and product.outlet_id != user.outlet_id:
         raise HTTPException(status_code=403, detail="Produk bukan milik outlet Anda")
+    stock_before = int(product.stock or 0)
     if payload.kind == "opname":
         product.stock = max(0, payload.quantity)
+        delta = product.stock - stock_before
     else:
-        product.stock = max(0, int(product.stock or 0) + payload.quantity)
+        product.stock = max(0, stock_before + payload.quantity)
+        delta = product.stock - stock_before
+    stock_after = int(product.stock or 0)
+    outlet_id_final = product.outlet_id or user.outlet_id or "outlet-sudirman"
     log = M.StockLog(
         product_id=product_id,
-        outlet_id=product.outlet_id or user.outlet_id or "outlet-sudirman",
+        outlet_id=outlet_id_final,
         quantity=payload.quantity,
         reason=payload.reason,
         kind=payload.kind,
@@ -711,6 +718,19 @@ async def adjust_stock(
         user_name=user.name,
     )
     db.add(log)
+    # Batch C: Advanced Inventory audit trail
+    db.add(M.StockMovement(
+        product_id=product_id,
+        outlet_id=outlet_id_final,
+        kind=payload.kind,  # in | out | opname
+        delta=delta,
+        stock_before=stock_before,
+        stock_after=stock_after,
+        reason=payload.reason or ("Opname" if payload.kind == "opname" else "Adjust"),
+        operator_id=user.id,
+        operator_name=user.name,
+        ref_id="",
+    ))
     await db.commit()
     await db.refresh(product)
     return to_dict(product)
@@ -890,12 +910,26 @@ async def create_sale(
         lines=verified_lines,
     )
     db.add(sale)
-    # Deduct stock
+    # Deduct stock + write StockMovement (Batch C audit trail)
     for line in verified_lines:
         r = await db.execute(select(M.Product).where(M.Product.id == line["product_id"]))
         product = r.scalar_one_or_none()
         if product:
-            product.stock = max(0, int(product.stock or 0) - int(line["quantity"]))
+            stock_before = int(product.stock or 0)
+            product.stock = max(0, stock_before - int(line["quantity"]))
+            stock_after = int(product.stock or 0)
+            db.add(M.StockMovement(
+                product_id=product.id,
+                outlet_id=product.outlet_id or sale.outlet_id,
+                kind="sale",
+                delta=stock_after - stock_before,
+                stock_before=stock_before,
+                stock_after=stock_after,
+                reason=f"Penjualan {sale.table_no}",
+                operator_id=user.id,
+                operator_name=user.name,
+                ref_id=sale.id,
+            ))
     await db.commit()
     await db.refresh(sale)
     # Kitchen tickets split per merchant
@@ -1449,6 +1483,291 @@ async def vendor_settlement(
         "net": gross - commission,
         "payout_status": "Siap dicairkan" if gross > 0 else "Belum ada omset",
     }
+
+
+# -----------------------------------------------------------------------------
+# Batch C — Advanced Inventory (Stock Movements) & Vendor Settlement Ledger
+# -----------------------------------------------------------------------------
+
+class ManualStockMovementInput(BaseModel):
+    product_id: str
+    kind: str = "adjust"  # in | out | opname | adjust
+    delta: int = 0        # positive or negative for in/out/adjust; ignored for opname
+    target_stock: Optional[int] = None  # required when kind=opname
+    reason: str = "Adjust"
+    ref_id: str = ""
+
+
+@api_router.get("/inventory/stock-movements")
+async def list_stock_movements(
+    outlet_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+    kind: Optional[str] = None,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Admin", "Super Admin")),
+):
+    scope = outlet_scope(user, outlet_id)
+    stmt = select(M.StockMovement).order_by(M.StockMovement.created_at.desc()).limit(min(limit, 500))
+    if scope:
+        stmt = stmt.where(M.StockMovement.outlet_id == scope)
+    if product_id:
+        stmt = stmt.where(M.StockMovement.product_id == product_id)
+    if kind:
+        stmt = stmt.where(M.StockMovement.kind == kind)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [to_dict(r) for r in rows]
+
+
+@api_router.post("/inventory/stock-movements")
+async def create_stock_movement(
+    payload: ManualStockMovementInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Admin", "Super Admin")),
+):
+    r = await db.execute(select(M.Product).where(M.Product.id == payload.product_id))
+    product = r.scalar_one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Produk tidak ditemukan")
+    if user.role == "Admin" and product.outlet_id and product.outlet_id != user.outlet_id:
+        raise HTTPException(status_code=403, detail="Produk bukan milik outlet Anda")
+    stock_before = int(product.stock or 0)
+    if payload.kind == "opname":
+        if payload.target_stock is None:
+            raise HTTPException(status_code=400, detail="target_stock wajib untuk opname")
+        stock_after = max(0, int(payload.target_stock))
+    else:
+        stock_after = max(0, stock_before + int(payload.delta))
+    product.stock = stock_after
+    delta = stock_after - stock_before
+    outlet_id_final = product.outlet_id or user.outlet_id or "outlet-sudirman"
+    mv = M.StockMovement(
+        product_id=payload.product_id,
+        outlet_id=outlet_id_final,
+        kind=payload.kind,
+        delta=delta,
+        stock_before=stock_before,
+        stock_after=stock_after,
+        reason=payload.reason,
+        operator_id=user.id,
+        operator_name=user.name,
+        ref_id=payload.ref_id,
+    )
+    db.add(mv)
+    # Also mirror to legacy StockLog to keep dashboards intact
+    db.add(M.StockLog(
+        product_id=payload.product_id,
+        outlet_id=outlet_id_final,
+        quantity=delta,
+        reason=payload.reason,
+        kind=payload.kind if payload.kind != "adjust" else ("in" if delta >= 0 else "out"),
+        note="",
+        user_id=user.id,
+        user_name=user.name,
+    ))
+    await db.commit()
+    await db.refresh(mv)
+    return to_dict(mv)
+
+
+# ── Products Bulk Import (Excel/CSV parsed on the client, sent as JSON) ──────
+class BulkProductRow(BaseModel):
+    id: Optional[str] = None
+    name: str
+    category: str = "Lain-lain"
+    vendor: str = "MJD Kupi"
+    merchant_id: Optional[str] = None
+    outlet_id: Optional[str] = None
+    price: float = 0
+    cost: float = 0
+    stock: int = 0
+    color: str = "#ffedd5"
+
+
+class BulkProductInput(BaseModel):
+    rows: List[BulkProductRow]
+    mode: str = "upsert"  # upsert | insert
+
+
+@api_router.post("/products/bulk-import")
+async def bulk_import_products(
+    payload: BulkProductInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
+):
+    created, updated, errors = 0, 0, []
+    for i, row in enumerate(payload.rows):
+        if not row.name:
+            errors.append({"row": i + 1, "error": "Nama produk kosong"})
+            continue
+        target_outlet = row.outlet_id or user.outlet_id or "outlet-sudirman"
+        if user.role == "Admin" and target_outlet != (user.outlet_id or "outlet-sudirman"):
+            target_outlet = user.outlet_id or "outlet-sudirman"
+        # Match by id or name+outlet
+        existing = None
+        if row.id:
+            existing = (await db.execute(select(M.Product).where(M.Product.id == row.id))).scalar_one_or_none()
+        if not existing and payload.mode == "upsert":
+            existing = (await db.execute(
+                select(M.Product).where(M.Product.name == row.name, M.Product.outlet_id == target_outlet)
+            )).scalar_one_or_none()
+        if existing:
+            existing.category = row.category or existing.category
+            existing.vendor = row.vendor or existing.vendor
+            existing.price = float(row.price)
+            existing.cost = float(row.cost)
+            existing.stock = int(row.stock)
+            if row.merchant_id:
+                existing.merchant_id = row.merchant_id
+            if row.color:
+                existing.color = row.color
+            updated += 1
+        else:
+            db.add(M.Product(
+                id=row.id or str(uuid.uuid4()),
+                name=row.name,
+                category=row.category,
+                vendor=row.vendor,
+                merchant_id=row.merchant_id,
+                outlet_id=target_outlet,
+                price=float(row.price),
+                cost=float(row.cost),
+                stock=int(row.stock),
+                color=row.color or "#ffedd5",
+                modifiers=[],
+                variants=[],
+            ))
+            created += 1
+    await db.commit()
+    return {"created": created, "updated": updated, "errors": errors, "total": len(payload.rows)}
+
+
+# ── Settlement / Payout Center (per-merchant breakdown + ledger) ─────────────
+
+class PayoutInput(BaseModel):
+    merchant_id: str
+    period_start: str  # YYYY-MM-DD
+    period_end: str
+    note: str = ""
+
+
+async def _compute_settlement_breakdown(
+    db: AsyncSession, outlet_id: Optional[str], date_from: Optional[str], date_to: Optional[str]
+) -> list[dict]:
+    """Aggregate sales.lines per merchant with commission from merchant scheme."""
+    merchants = (await db.execute(select(M.Merchant))).scalars().all()
+    merchant_map = {m.id: m for m in merchants}
+
+    stmt = select(M.Sale).where(M.Sale.status == "paid")
+    if outlet_id:
+        stmt = stmt.where(M.Sale.outlet_id == outlet_id)
+    if date_from:
+        stmt = stmt.where(M.Sale.created_at >= datetime.fromisoformat(date_from))
+    if date_to:
+        # inclusive end-of-day
+        stmt = stmt.where(M.Sale.created_at <= datetime.fromisoformat(date_to) + timedelta(days=1))
+    sales = (await db.execute(stmt)).scalars().all()
+
+    buckets: dict[str, dict] = {}
+    for sale in sales:
+        for line in (sale.lines or []):
+            mid = line.get("merchant_id") or "unassigned"
+            m = merchant_map.get(mid)
+            bucket = buckets.setdefault(mid, {
+                "merchant_id": mid,
+                "merchant_name": m.name if m else "Tanpa Merchant",
+                "commission_scheme": (m.commission_scheme if m else "percent"),
+                "commission_percent": (m.commission_percent if m else 0.0),
+                "commission_fixed": (m.commission_fixed if m else 0.0),
+                "gross": 0.0,
+                "item_count": 0,
+                "sale_ids": [],
+                "commission": 0.0,
+                "net": 0.0,
+            })
+            qty = int(line.get("quantity") or 0)
+            price = float(line.get("price") or 0)
+            gross_line = qty * price
+            bucket["gross"] += gross_line
+            bucket["item_count"] += qty
+            if sale.id not in bucket["sale_ids"]:
+                bucket["sale_ids"].append(sale.id)
+            # commission per line
+            if bucket["commission_scheme"] == "fixed":
+                bucket["commission"] += bucket["commission_fixed"] * qty
+            else:
+                bucket["commission"] += gross_line * (bucket["commission_percent"] / 100.0)
+    for b in buckets.values():
+        b["gross"] = round(b["gross"])
+        b["commission"] = round(b["commission"])
+        b["net"] = b["gross"] - b["commission"]
+    # sort by gross desc
+    return sorted(buckets.values(), key=lambda x: x["gross"], reverse=True)
+
+
+@api_router.get("/settlement/preview")
+async def settlement_preview(
+    outlet_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Admin", "Super Admin")),
+):
+    scope = outlet_scope(user, outlet_id)
+    breakdown = await _compute_settlement_breakdown(db, scope, date_from, date_to)
+    totals = {
+        "gross": sum(b["gross"] for b in breakdown),
+        "commission": sum(b["commission"] for b in breakdown),
+        "net": sum(b["net"] for b in breakdown),
+        "item_count": sum(b["item_count"] for b in breakdown),
+    }
+    return {"breakdown": breakdown, "totals": totals, "date_from": date_from, "date_to": date_to}
+
+
+@api_router.get("/settlement/payouts")
+async def list_payouts(
+    merchant_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Admin", "Super Admin")),
+):
+    stmt = select(M.Payout).order_by(M.Payout.created_at.desc()).limit(200)
+    if merchant_id:
+        stmt = stmt.where(M.Payout.merchant_id == merchant_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [to_dict(r) for r in rows]
+
+
+@api_router.post("/settlement/payouts")
+async def create_payout(
+    payload: PayoutInput,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Admin", "Super Admin")),
+):
+    merchant = (await db.execute(select(M.Merchant).where(M.Merchant.id == payload.merchant_id))).scalar_one_or_none()
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant tidak ditemukan")
+    breakdown = await _compute_settlement_breakdown(db, None, payload.period_start, payload.period_end)
+    entry = next((b for b in breakdown if b["merchant_id"] == payload.merchant_id), None)
+    if not entry or entry["gross"] <= 0:
+        raise HTTPException(status_code=400, detail="Belum ada omset untuk merchant pada periode ini")
+    payout = M.Payout(
+        merchant_id=payload.merchant_id,
+        period_start=payload.period_start,
+        period_end=payload.period_end,
+        gross=entry["gross"],
+        commission=entry["commission"],
+        net=entry["net"],
+        item_count=entry["item_count"],
+        sale_ids=entry["sale_ids"],
+        status="paid",
+        note=payload.note,
+        operator_id=user.id,
+        operator_name=user.name,
+    )
+    db.add(payout)
+    await db.commit()
+    await db.refresh(payout)
+    return to_dict(payout)
 
 
 # -----------------------------------------------------------------------------
@@ -2031,6 +2350,8 @@ async def bootstrap():
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS features_enabled JSONB DEFAULT '{}'::jsonb",
             "CREATE INDEX IF NOT EXISTS ix_sales_outlet ON mjd_sales(outlet_id)",
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(32) DEFAULT ''",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_scheme VARCHAR(16) DEFAULT 'percent'",
+            "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_fixed FLOAT DEFAULT 0",
             "UPDATE mjd_self_orders SET status='Pesanan Diterima' WHERE status='Menunggu kasir'",
             "UPDATE mjd_users SET role='Admin' WHERE role='Merchant Admin'",
             "UPDATE mjd_users SET merchant_id='m-barista' WHERE role='Vendor' AND (merchant_id IS NULL OR merchant_id='')",

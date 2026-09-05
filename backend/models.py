@@ -49,6 +49,8 @@ class Merchant(Base):
     name = Column(String(120), nullable=False)
     category = Column(String(64), default="F&B")
     commission_percent = Column(Float, default=10.0)
+    commission_scheme = Column(String(16), default="percent")  # percent | fixed
+    commission_fixed = Column(Float, default=0.0)  # Rp per item sold when scheme=fixed
     phone = Column(String(32), default="")
     color = Column(String(16), default="#ffedd5")
     active = Column(Boolean, default=True)
@@ -186,6 +188,42 @@ class Setting(Base):
     key = Column(String(64), primary_key=True)
     value = Column(JSON, default=dict)
     updated_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class StockMovement(Base):
+    """Audit trail for every stock change (Batch C — Advanced Inventory)."""
+    __tablename__ = "mjd_stock_movements"
+    id = Column(String(36), primary_key=True, default=gen_uuid)
+    product_id = Column(String(36), ForeignKey("mjd_products.id", ondelete="CASCADE"), index=True)
+    outlet_id = Column(String(36), index=True)
+    kind = Column(String(24), default="adjust")  # in | out | sale | opname | initial
+    delta = Column(Integer, default=0)  # positive or negative
+    stock_before = Column(Integer, default=0)
+    stock_after = Column(Integer, default=0)
+    reason = Column(String(255), default="")
+    operator_id = Column(String(36), index=True)
+    operator_name = Column(String(120), default="")
+    ref_id = Column(String(64), default="")  # sale_id, opname_id, etc.
+    created_at = Column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class Payout(Base):
+    """Vendor settlement payout ledger (Batch C — Vendor Settlement Center)."""
+    __tablename__ = "mjd_payouts"
+    id = Column(String(36), primary_key=True, default=gen_uuid)
+    merchant_id = Column(String(36), ForeignKey("mjd_merchants.id", ondelete="CASCADE"), index=True)
+    period_start = Column(String(20), default="")  # YYYY-MM-DD
+    period_end = Column(String(20), default="")
+    gross = Column(Float, default=0.0)
+    commission = Column(Float, default=0.0)
+    net = Column(Float, default=0.0)
+    item_count = Column(Integer, default=0)
+    sale_ids = Column(JSON, default=list)
+    status = Column(String(16), default="paid")  # paid | pending
+    note = Column(Text, default="")
+    operator_id = Column(String(36), default="")
+    operator_name = Column(String(120), default="")
+    created_at = Column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 Index("ix_kitchen_status_start", KitchenOrder.status, KitchenOrder.sla_start)

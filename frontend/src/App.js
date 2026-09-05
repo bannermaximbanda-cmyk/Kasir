@@ -8,10 +8,12 @@ import {
   Trash2, Users, Wallet, X, Building2, Volume2, MessageCircle, PlayCircle,
   StopCircle, UserCheck, Upload, Image as ImageIcon, Check, Copy, Shield,
   Eye, EyeOff, RefreshCw, Bluetooth, MapPin, Star, ChevronRight, Link as LinkIcon, Info,
+  Download, FileSpreadsheet, TrendingDown, TrendingUp, ArrowRightLeft,
 } from "lucide-react";
 import { pairPrinter, directPrint, isPrinterConnected, pairedPrinterName, isPrinterSupported, buildSaleReceipt, buildShiftReport, buildKitchenTicket } from "@/utils/thermalPrinter";
 import { queueSale, drainQueue, queuedCount } from "@/utils/offlineQueue";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
+import * as XLSX from "xlsx";
 import "@/App.css";
 
 const money = (n) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
@@ -842,31 +844,173 @@ function Inventory({ products, reload, notify }) {
   const [showIn, setShowIn] = useState(false);
   const [showOpname, setShowOpname] = useState(false);
   const [showOut, setShowOut] = useState(false);
+  const [tab, setTab] = useState("stock"); // stock | movements | excel
+  const [movements, setMovements] = useState([]);
+  const [mvFilter, setMvFilter] = useState({ product_id: "", kind: "" });
+  const [loadingMv, setLoadingMv] = useState(false);
   const doAdjust = async (id, quantity, kind, reason) => { await axios.patch(`${API}/products/${id}/stock`, { quantity, kind, reason, note: "" }); reload(); };
+
+  const loadMovements = async () => {
+    setLoadingMv(true);
+    try {
+      const params = new URLSearchParams();
+      if (mvFilter.product_id) params.set("product_id", mvFilter.product_id);
+      if (mvFilter.kind) params.set("kind", mvFilter.kind);
+      const { data } = await axios.get(`${API}/inventory/stock-movements?${params.toString()}`);
+      setMovements(data || []);
+    } catch (e) { notify("Gagal memuat mutasi stok"); }
+    setLoadingMv(false);
+  };
+  useEffect(() => { if (tab === "movements") loadMovements(); /* eslint-disable-next-line */ }, [tab, mvFilter.product_id, mvFilter.kind]);
+
+  // Excel Export
+  const exportExcel = () => {
+    const rows = products.map((p) => ({
+      id: p.id, name: p.name, category: p.category, vendor: p.vendor,
+      merchant_id: p.merchant_id || "", outlet_id: p.outlet_id || "outlet-sudirman",
+      price: p.price, cost: p.cost, stock: p.stock, color: p.color || "#ffedd5",
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Produk");
+    XLSX.writeFile(wb, `mjd-produk-${new Date().toISOString().slice(0,10)}.xlsx`);
+    notify(`${rows.length} produk diekspor ke Excel`);
+  };
+  const downloadTemplate = () => {
+    const ws = XLSX.utils.json_to_sheet([{ id: "", name: "Contoh Kopi Susu", category: "Kopi", vendor: "Barista Kopi", merchant_id: "m-barista", outlet_id: "outlet-sudirman", price: 25000, cost: 12000, stock: 50, color: "#ffedd5" }]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Template");
+    XLSX.writeFile(wb, "mjd-template-import-produk.xlsx");
+    notify("Template diunduh");
+  };
+  const handleImport = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    try {
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+      if (!rows.length) return notify("File Excel kosong");
+      const payload = rows.map((r) => ({
+        id: r.id || null,
+        name: String(r.name || r.Nama || "").trim(),
+        category: String(r.category || r.Kategori || "Lain-lain"),
+        vendor: String(r.vendor || r.Vendor || "MJD Kupi"),
+        merchant_id: r.merchant_id || null,
+        outlet_id: r.outlet_id || "outlet-sudirman",
+        price: Number(r.price || r.Harga || 0),
+        cost: Number(r.cost || r.HPP || 0),
+        stock: Number(r.stock || r.Stok || 0),
+        color: r.color || "#ffedd5",
+      }));
+      const { data } = await axios.post(`${API}/products/bulk-import`, { rows: payload, mode: "upsert" });
+      notify(`Import: ${data.created} baru, ${data.updated} diperbarui, ${data.errors?.length || 0} error`);
+      reload();
+    } catch (err) {
+      notify(err.response?.data?.detail || "Gagal mengimpor file Excel");
+    }
+    e.target.value = "";
+  };
+
+  const kindLabel = { in: "Masuk", out: "Keluar", opname: "Opname", sale: "Penjualan", adjust: "Adjust", initial: "Awal" };
+  const kindTone = { in: "green", out: "red", sale: "red", opname: "blue", adjust: "orange", initial: "orange" };
+  const productMap = useMemo(() => Object.fromEntries(products.map((p) => [p.id, p])), [products]);
+
   return <>
-    <SectionHeader eyebrow="STOCK ENGINE" title="Inventori & stok" description="Kelola barang masuk, keluar, dan audit stok outlet."
+    <SectionHeader eyebrow="STOCK ENGINE" title="Inventori & stok" description="Kelola barang masuk, keluar, mutasi audit, dan import massal via Excel."
       action={<div className="row-gap">
         <button className="outline-btn" onClick={() => setShowOut(true)} data-testid="stock-out-button"><Trash2 size={14} /> Barang keluar</button>
         <button className="outline-btn" onClick={() => setShowOpname(true)} data-testid="stock-opname-button">Stock opname</button>
         <button className="primary-btn" data-testid="stock-in-button" onClick={() => setShowIn(true)}><Plus size={16} /> Barang masuk</button>
       </div>} />
-    <div className="metric-grid three">
-      <Metric label="Total unit" value={products.reduce((a, p) => a + p.stock, 0)} change={`${products.length} produk aktif`} tone="orange" icon={Package} />
-      <Metric label="Stok menipis" value={products.filter((p) => p.stock < 15).length} change="Perlu restock" tone="red" icon={Bell} />
-      <Metric label="Nilai persediaan" value={money(products.reduce((a, p) => a + p.stock * p.cost, 0))} change="HPP × stok" tone="green" icon={BarChart3} />
+    <div className="ft-tabs" style={{ marginBottom: 12 }}>
+      <button className={tab === "stock" ? "active" : ""} onClick={() => setTab("stock")} data-testid="inventory-tab-stock"><Package size={14} /> Ringkasan Stok</button>
+      <button className={tab === "movements" ? "active" : ""} onClick={() => setTab("movements")} data-testid="inventory-tab-movements"><ArrowRightLeft size={14} /> Mutasi Stok</button>
+      <button className={tab === "excel" ? "active" : ""} onClick={() => setTab("excel")} data-testid="inventory-tab-excel"><FileSpreadsheet size={14} /> Import / Export Excel</button>
     </div>
-    <section className="panel table-panel">
-      <div className="panel-head"><div><h2>Ringkasan stok produk</h2><span>Sync Supabase</span></div></div>
-      <div className="data-table">
-        <div className="table-row table-label"><span>Produk</span><span>Vendor</span><span>HPP</span><span>Stok</span><span>Status</span><span /></div>
-        {products.map((p) => <div className="table-row" key={p.id}>
-          <span className="table-product"><div className="product-dot" style={{ background: p.color }}><Coffee size={14} /></div><b>{p.name}</b></span>
-          <span>{p.vendor}</span><span>{money(p.cost)}</span><span><b>{p.stock}</b> unit</span>
-          <span><i className={`status-dot ${p.stock < 15 ? "low" : "good"}`} />{p.stock < 15 ? "Menipis" : "Aman"}</span>
-          <button className="small-action" onClick={() => { doAdjust(p.id, 10, "in", "Restock"); notify("+10 unit"); }} data-testid={`restock-${p.id}`}><Plus size={14} /> +10</button>
-        </div>)}
+    {tab === "stock" && <>
+      <div className="metric-grid three">
+        <Metric label="Total unit" value={products.reduce((a, p) => a + p.stock, 0)} change={`${products.length} produk aktif`} tone="orange" icon={Package} />
+        <Metric label="Stok menipis" value={products.filter((p) => p.stock < 15).length} change="Perlu restock" tone="red" icon={Bell} />
+        <Metric label="Nilai persediaan" value={money(products.reduce((a, p) => a + p.stock * p.cost, 0))} change="HPP × stok" tone="green" icon={BarChart3} />
       </div>
-    </section>
+      <section className="panel table-panel">
+        <div className="panel-head"><div><h2>Ringkasan stok produk</h2><span>Sync Supabase</span></div></div>
+        <div className="data-table">
+          <div className="table-row table-label"><span>Produk</span><span>Vendor</span><span>HPP</span><span>Stok</span><span>Status</span><span /></div>
+          {products.map((p) => <div className="table-row" key={p.id}>
+            <span className="table-product"><div className="product-dot" style={{ background: p.color }}><Coffee size={14} /></div><b>{p.name}</b></span>
+            <span>{p.vendor}</span><span>{money(p.cost)}</span><span><b>{p.stock}</b> unit</span>
+            <span><i className={`status-dot ${p.stock < 15 ? "low" : "good"}`} />{p.stock < 15 ? "Menipis" : "Aman"}</span>
+            <button className="small-action" onClick={() => { doAdjust(p.id, 10, "in", "Restock"); notify("+10 unit"); }} data-testid={`restock-${p.id}`}><Plus size={14} /> +10</button>
+          </div>)}
+        </div>
+      </section>
+    </>}
+    {tab === "movements" && <>
+      <section className="panel">
+        <div className="panel-head">
+          <div><h2>Mutasi stok (Audit Trail)</h2><span>Setiap perubahan stok terekam otomatis — {movements.length} entri</span></div>
+          <div className="row-gap">
+            <select value={mvFilter.kind} onChange={(e) => setMvFilter({ ...mvFilter, kind: e.target.value })} data-testid="mv-kind-filter">
+              <option value="">Semua Jenis</option>
+              <option value="in">Barang Masuk</option>
+              <option value="out">Barang Keluar</option>
+              <option value="sale">Penjualan</option>
+              <option value="opname">Opname</option>
+              <option value="adjust">Adjust</option>
+            </select>
+            <select value={mvFilter.product_id} onChange={(e) => setMvFilter({ ...mvFilter, product_id: e.target.value })} data-testid="mv-product-filter">
+              <option value="">Semua Produk</option>
+              {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <button className="outline-btn" onClick={loadMovements} data-testid="mv-reload"><RefreshCw size={14} /> Muat</button>
+          </div>
+        </div>
+        <div className="data-table" data-testid="stock-movements-table">
+          <div className="table-row table-label"><span>Waktu</span><span>Produk</span><span>Jenis</span><span>Perubahan</span><span>Sebelum → Sesudah</span><span>Operator / Alasan</span></div>
+          {loadingMv && <div className="empty-vendor"><b>Memuat…</b></div>}
+          {!loadingMv && !movements.length && <div className="empty-vendor" data-testid="mv-empty"><Package size={30} /><b>Belum ada mutasi</b><span>Lakukan transaksi POS atau adjust stok untuk mulai mencatat</span></div>}
+          {movements.map((m) => {
+            const p = productMap[m.product_id];
+            const t = kindTone[m.kind] || "orange";
+            const Icon = m.delta >= 0 ? TrendingUp : TrendingDown;
+            return <div className="table-row" key={m.id} data-testid={`mv-row-${m.id}`}>
+              <span><small>{new Date(m.created_at).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</small></span>
+              <span><b>{p?.name || m.product_id.slice(0, 8)}</b></span>
+              <span><span className="method-badge" style={{ background: t === "green" ? "#dcfce7" : t === "red" ? "#fee2e2" : t === "blue" ? "#dbeafe" : "#ffedd5" }}>{kindLabel[m.kind] || m.kind}</span></span>
+              <span style={{ color: m.delta >= 0 ? "#059669" : "#dc2626", fontWeight: 700 }}><Icon size={13} /> {m.delta > 0 ? `+${m.delta}` : m.delta}</span>
+              <span><b>{m.stock_before}</b> → <b>{m.stock_after}</b></span>
+              <span><small>{m.operator_name || "-"} · {m.reason}</small></span>
+            </div>;
+          })}
+        </div>
+      </section>
+    </>}
+    {tab === "excel" && <>
+      <section className="panel product-form-v2">
+        <div className="form-heading"><div className="form-icon"><FileSpreadsheet size={18} /></div>
+          <div><h2>Import & Export Produk (Excel)</h2><span>Kelola katalog dalam jumlah besar. Format .xlsx / .xls / .csv</span></div>
+        </div>
+        <div className="excel-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div className="excel-card" style={{ padding: 20, border: "1px dashed #e5e7eb", borderRadius: 12 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}><Upload size={16} style={{ verticalAlign: "middle" }} /> Import dari Excel</h3>
+            <p style={{ fontSize: 13, color: "#6b7280", margin: "8px 0 16px" }}>Kolom yang didukung: <b>id</b>, <b>name</b>, <b>category</b>, <b>vendor</b>, <b>merchant_id</b>, <b>outlet_id</b>, <b>price</b>, <b>cost</b>, <b>stock</b>, <b>color</b>. Mode <b>upsert</b> — produk dengan nama sama pada outlet yang sama akan di-update.</p>
+            <div className="row-gap">
+              <button className="outline-btn" onClick={downloadTemplate} data-testid="download-template-btn"><Download size={14} /> Unduh Template</button>
+              <label className="primary-btn" data-testid="upload-excel-label">
+                <Upload size={14} /> Pilih File Excel
+                <input type="file" accept=".xlsx,.xls,.csv" onChange={handleImport} style={{ display: "none" }} data-testid="upload-excel-input" />
+              </label>
+            </div>
+          </div>
+          <div className="excel-card" style={{ padding: 20, border: "1px dashed #e5e7eb", borderRadius: 12 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}><Download size={16} style={{ verticalAlign: "middle" }} /> Export ke Excel</h3>
+            <p style={{ fontSize: 13, color: "#6b7280", margin: "8px 0 16px" }}>Unduh seluruh katalog produk aktif ({products.length} produk) sebagai file .xlsx — termasuk stok terkini & HPP.</p>
+            <button className="primary-btn" onClick={exportExcel} data-testid="export-excel-btn"><FileSpreadsheet size={14} /> Export {products.length} Produk</button>
+          </div>
+        </div>
+      </section>
+    </>}
     {showIn && <StockModal title="Barang masuk (Restock)" products={products} kind="in" onClose={() => setShowIn(false)} onSubmit={(pid, qty, note) => { doAdjust(pid, qty, "in", note || "Restock"); setShowIn(false); notify("Stok masuk tercatat"); }} />}
     {showOut && <StockModal title="Barang keluar / rusak" products={products} kind="out" onClose={() => setShowOut(false)} onSubmit={(pid, qty, note) => { doAdjust(pid, -Math.abs(qty), "out", note || "Basi/Rusak"); setShowOut(false); notify("Stok keluar tercatat"); }} />}
     {showOpname && <StockModal title="Stock opname (Audit)" products={products} kind="opname" onClose={() => setShowOpname(false)} onSubmit={(pid, qty, note) => { doAdjust(pid, qty, "opname", note || "Adjust opname"); setShowOpname(false); notify("Stok disesuaikan"); }} />}
@@ -1379,21 +1523,57 @@ function SelfService({ products, notify, activeOutlet, outlets }) {
 function VendorCenter({ notify }) {
   const [orders, setOrders] = useState([]);
   const [settlement, setSettlement] = useState({ gross: 0, commission: 0, net: 0, payout_status: "Memuat" });
+  const [preview, setPreview] = useState({ breakdown: [], totals: { gross: 0, commission: 0, net: 0, item_count: 0 } });
+  const [payouts, setPayouts] = useState([]);
+  const [tab, setTab] = useState("queue"); // queue | settlement | payouts
+  const today = new Date().toISOString().slice(0, 10);
+  const firstOfMonth = new Date(); firstOfMonth.setDate(1);
+  const [period, setPeriod] = useState({ from: firstOfMonth.toISOString().slice(0, 10), to: today });
+  const [payoutModal, setPayoutModal] = useState(null); // { merchant_id, merchant_name, ... }
+
   const load = () => {
     axios.get(`${API}/vendor/orders`).then(({ data }) => setOrders(data)).catch(() => {});
     axios.get(`${API}/vendor/settlement`).then(({ data }) => setSettlement(data)).catch(() => {});
   };
+  const loadPreview = () => {
+    const params = new URLSearchParams({ date_from: period.from, date_to: period.to });
+    axios.get(`${API}/settlement/preview?${params.toString()}`).then(({ data }) => setPreview(data)).catch(() => {});
+  };
+  const loadPayouts = () => axios.get(`${API}/settlement/payouts`).then(({ data }) => setPayouts(data)).catch(() => {});
+
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
+  useEffect(() => { if (tab === "settlement") loadPreview(); if (tab === "payouts") loadPayouts(); /* eslint-disable-next-line */ }, [tab, period.from, period.to]);
+
   const update = (id, status) => axios.patch(`${API}/vendor/orders/${id}?status=${encodeURIComponent(status)}`).then(load).then(() => notify("Status order diperbarui"));
+
+  const submitPayout = async (note) => {
+    if (!payoutModal) return;
+    try {
+      await axios.post(`${API}/settlement/payouts`, {
+        merchant_id: payoutModal.merchant_id,
+        period_start: period.from,
+        period_end: period.to,
+        note: note || "",
+      });
+      notify(`Payout ${payoutModal.merchant_name} sebesar ${money(payoutModal.net)} tercatat`);
+      setPayoutModal(null); loadPreview(); loadPayouts();
+    } catch (e) { notify(e.response?.data?.detail || "Gagal membuat payout"); }
+  };
+
   return <>
-    <SectionHeader eyebrow="VENDOR OPERATIONS" title="Pusat vendor" description="Antrean dapur, settlement, dan payout tenant dalam satu layar."
+    <SectionHeader eyebrow="VENDOR OPERATIONS" title="Pusat vendor" description="Antrean dapur, settlement per-merchant, dan riwayat payout."
       action={<button className="outline-btn" data-testid="refresh-vendor-button" onClick={load}><Bell size={15} /> Refresh</button>} />
     <div className="vendor-metrics">
       <Metric label="Omset tenant" value={money(settlement.gross)} change="periode berjalan" tone="orange" icon={Receipt} />
-      <Metric label="Komisi platform" value={money(settlement.commission)} change="10% settlement" tone="blue" icon={BarChart3} />
+      <Metric label="Komisi platform" value={money(settlement.commission)} change="rata-rata 10%" tone="blue" icon={BarChart3} />
       <Metric label="Net payout" value={money(settlement.net)} change={settlement.payout_status} tone="green" icon={Wallet} />
     </div>
-    <div className="vendor-grid">
+    <div className="ft-tabs" style={{ marginBottom: 12 }}>
+      <button className={tab === "queue" ? "active" : ""} onClick={() => setTab("queue")} data-testid="vendor-tab-queue"><ChefHat size={14} /> Antrean Order</button>
+      <button className={tab === "settlement" ? "active" : ""} onClick={() => setTab("settlement")} data-testid="vendor-tab-settlement"><Wallet size={14} /> Settlement per Merchant</button>
+      <button className={tab === "payouts" ? "active" : ""} onClick={() => setTab("payouts")} data-testid="vendor-tab-payouts"><FileText size={14} /> Riwayat Payout</button>
+    </div>
+    {tab === "queue" && <div className="vendor-grid">
       <section className="panel vendor-queue">
         <div className="panel-head"><div><h2>Antrean self-order</h2><span>Otomatis polling 5 detik</span></div><span className="live-pill"><i /> Live</span></div>
         {orders.length ? orders.map((order) => <div className="order-ticket" key={order.id}>
@@ -1404,14 +1584,77 @@ function VendorCenter({ notify }) {
         </div>) : <div className="empty-vendor"><ChefHat size={30} /><b>Antrean masih kosong</b><span>Pesanan self-service baru akan tampil di sini</span></div>}
       </section>
       <section className="panel payout-card">
-        <div className="panel-head"><div><h2>Settlement tenant</h2><span>Ringkasan bagi hasil vendor</span></div></div>
+        <div className="panel-head"><div><h2>Ringkasan platform</h2><span>Snapshot cepat</span></div></div>
         <div className="settlement-line"><span>Omset kotor</span><b>{money(settlement.gross)}</b></div>
-        <div className="settlement-line"><span>Komisi platform (10%)</span><b className="red-text">−{money(settlement.commission)}</b></div>
-        <div className="settlement-line net"><span>Penghasilan bersih</span><strong>{money(settlement.net)}</strong></div>
-        <button className="primary-btn full" data-testid="vendor-payout-button" onClick={() => notify("Payout vendor masuk ke antrean persetujuan")}>Ajukan payout <span>→</span></button>
+        <div className="settlement-line"><span>Komisi platform</span><b className="red-text">−{money(settlement.commission)}</b></div>
+        <div className="settlement-line net"><span>Total net vendor</span><strong>{money(settlement.net)}</strong></div>
+        <button className="primary-btn full" data-testid="vendor-goto-settlement" onClick={() => setTab("settlement")}>Buka Settlement Center <span>→</span></button>
       </section>
-    </div>
+    </div>}
+    {tab === "settlement" && <>
+      <section className="panel" data-testid="settlement-panel">
+        <div className="panel-head">
+          <div><h2>Settlement per-merchant</h2><span>Bagi hasil otomatis berdasarkan skema komisi setiap merchant</span></div>
+          <div className="row-gap">
+            <label><small style={{ display: "block", fontSize: 11, color: "#6b7280" }}>Dari</small><input type="date" value={period.from} onChange={(e) => setPeriod({ ...period, from: e.target.value })} data-testid="period-from" /></label>
+            <label><small style={{ display: "block", fontSize: 11, color: "#6b7280" }}>Sampai</small><input type="date" value={period.to} onChange={(e) => setPeriod({ ...period, to: e.target.value })} data-testid="period-to" /></label>
+            <button className="outline-btn" onClick={loadPreview} data-testid="settlement-reload"><RefreshCw size={14} /> Hitung</button>
+          </div>
+        </div>
+        <div className="metric-grid three" style={{ marginTop: 12 }}>
+          <Metric label="Omset periode" value={money(preview.totals.gross)} change={`${preview.totals.item_count} item terjual`} tone="orange" icon={Receipt} />
+          <Metric label="Komisi platform" value={money(preview.totals.commission)} change={`${preview.breakdown.length} merchant`} tone="blue" icon={BarChart3} />
+          <Metric label="Net vendor" value={money(preview.totals.net)} change="Bersih ke tenant" tone="green" icon={Wallet} />
+        </div>
+        <div className="data-table" style={{ marginTop: 16 }}>
+          <div className="table-row table-label"><span>Merchant</span><span>Item</span><span>Skema</span><span>Gross</span><span>Komisi</span><span>Net</span><span /></div>
+          {!preview.breakdown.length && <div className="empty-vendor"><Wallet size={30} /><b>Belum ada omset di periode ini</b><span>Ubah rentang tanggal atau lakukan transaksi POS</span></div>}
+          {preview.breakdown.map((b) => <div className="table-row" key={b.merchant_id} data-testid={`settlement-row-${b.merchant_id}`}>
+            <span><b>{b.merchant_name}</b></span>
+            <span>{b.item_count}</span>
+            <span><small>{b.commission_scheme === "fixed" ? `Fix ${money(b.commission_fixed)}/item` : `${b.commission_percent}%`}</small></span>
+            <span><b>{money(b.gross)}</b></span>
+            <span className="red-text">−{money(b.commission)}</span>
+            <span style={{ color: "#059669", fontWeight: 700 }}>{money(b.net)}</span>
+            <button className="primary-btn" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => setPayoutModal(b)} data-testid={`payout-btn-${b.merchant_id}`}>Bayar →</button>
+          </div>)}
+        </div>
+      </section>
+    </>}
+    {tab === "payouts" && <>
+      <section className="panel" data-testid="payouts-panel">
+        <div className="panel-head"><div><h2>Riwayat payout</h2><span>{payouts.length} entri tercatat</span></div><button className="outline-btn" onClick={loadPayouts}><RefreshCw size={14}/> Refresh</button></div>
+        <div className="data-table">
+          <div className="table-row table-label"><span>Tanggal</span><span>Merchant</span><span>Periode</span><span>Item</span><span>Gross</span><span>Net</span><span>Status</span></div>
+          {!payouts.length && <div className="empty-vendor"><FileText size={30} /><b>Belum ada payout tercatat</b><span>Buat payout dari tab Settlement</span></div>}
+          {payouts.map((p) => <div className="table-row" key={p.id} data-testid={`payout-row-${p.id}`}>
+            <span><small>{new Date(p.created_at).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" })}</small></span>
+            <span><b>{p.merchant_id?.slice(0, 12)}…</b></span>
+            <span><small>{p.period_start} → {p.period_end}</small></span>
+            <span>{p.item_count}</span>
+            <span>{money(p.gross)}</span>
+            <span style={{ color: "#059669", fontWeight: 700 }}>{money(p.net)}</span>
+            <span><span className="method-badge" style={{ background: "#dcfce7", color: "#166534" }}>{p.status}</span></span>
+          </div>)}
+        </div>
+      </section>
+    </>}
+    {payoutModal && <PayoutConfirmModal entry={payoutModal} period={period} onClose={() => setPayoutModal(null)} onConfirm={submitPayout} />}
   </>;
+}
+
+function PayoutConfirmModal({ entry, period, onClose, onConfirm }) {
+  const [note, setNote] = useState("");
+  return <div className="modal-backdrop"><div className="pay-modal" data-testid="payout-confirm-modal">
+    <button className="modal-close" onClick={onClose}><X size={18}/></button>
+    <div className="pay-head"><h2>Konfirmasi Payout</h2><span>Merchant: {entry.merchant_name}</span></div>
+    <div className="pay-body">
+      <div className="bind-info"><b>Periode</b><span>{period.from} → {period.to}</span><b>Total Item</b><span>{entry.item_count}</span><b>Gross</b><span>{money(entry.gross)}</span><b>Komisi</b><span className="red-text">−{money(entry.commission)}</span><b>Net Payout</b><span style={{ color: "#059669", fontWeight: 700 }}>{money(entry.net)}</span></div>
+      <label>Catatan (opsional)</label>
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Contoh: Transfer BCA 04/12" data-testid="payout-note-input" />
+    </div>
+    <button className="primary-btn full" onClick={() => onConfirm(note)} data-testid="payout-confirm-button"><Check size={14}/> Bayar {money(entry.net)}</button>
+  </div></div>;
 }
 
 // -------- Settings (Printer + Branding + Outlets, Super Admin only) --------
@@ -1507,6 +1750,7 @@ function SettingsPage({ notify, role }) {
     </>}
     {(role === "Super Admin" || role === "Admin") && <PaymentSettings notify={notify} />}
     {(role === "Super Admin" || role === "Admin") && <TaxSettings notify={notify} />}
+    {(role === "Super Admin" || role === "Admin") && <SoundSettings notify={notify} />}
     {(role === "Super Admin" || role === "Admin") && <PinGenerator notify={notify} />}
     {isSuper && <FeatureToggleMatrix notify={notify} outlets={outlets} />}
   </>;
@@ -1547,6 +1791,61 @@ function TaxSettings({ notify }) {
         <span>Total: {money(100000 + (cfg.enabled ? Math.round(100000 * cfg.percent / 100) : 0))}</span>
       </div>
       <button className="primary-btn" onClick={save} data-testid="save-tax-config"><Check size={14}/> Simpan</button>
+    </div>
+  </section>;
+}
+
+// -------- Sound Notification Settings (Batch C bonus) --------
+function SoundSettings({ notify }) {
+  const [cfg, setCfg] = useState({ enabled: true, volume: 70, chime_new_order: true, chime_kds_ready: true });
+  useEffect(() => {
+    axios.get(`${API}/settings/sound_config`).then(({ data }) => {
+      if (data && typeof data === "object" && "enabled" in data) setCfg((c) => ({ ...c, ...data }));
+    }).catch(() => {});
+  }, []);
+  const save = async () => {
+    try {
+      await axios.post(`${API}/settings`, { key: "sound_config", value: cfg });
+      try { localStorage.setItem("mjd_sound_config", JSON.stringify(cfg)); } catch {}
+      notify(cfg.enabled ? `Suara notifikasi ON — volume ${cfg.volume}%` : "Suara notifikasi dinonaktifkan");
+    } catch (e) { notify("Gagal simpan pengaturan suara"); }
+  };
+  const testChime = () => {
+    if (!cfg.enabled) return notify("Aktifkan dulu untuk test");
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.type = "sine"; o.frequency.value = 880;
+      g.gain.value = (cfg.volume / 100) * 0.35;
+      o.connect(g).connect(ctx.destination); o.start();
+      setTimeout(() => { o.frequency.value = 1174; }, 120);
+      setTimeout(() => { o.stop(); ctx.close(); }, 380);
+    } catch { notify("Browser tidak mendukung Web Audio"); }
+  };
+  return <section className="panel product-form-v2" data-testid="sound-settings-panel">
+    <div className="form-heading"><div className="form-icon"><Volume2 size={18}/></div>
+      <div><h2>Notifikasi Suara</h2><span>Chime saat pesanan baru masuk & tiket siap diambil di KDS</span></div>
+    </div>
+    <div className="tax-row">
+      <label className="switch-lg" data-testid="sound-toggle-wrapper">
+        <input type="checkbox" checked={cfg.enabled} onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} data-testid="sound-toggle" />
+        <i />
+        <span>{cfg.enabled ? "SUARA AKTIF" : "SUARA NONAKTIF"}</span>
+      </label>
+      <label className="tax-percent">
+        <span>Volume ({cfg.volume}%)</span>
+        <input type="range" min={0} max={100} value={cfg.volume} disabled={!cfg.enabled}
+          onChange={(e) => setCfg({ ...cfg, volume: Number(e.target.value) })}
+          data-testid="sound-volume-input" />
+      </label>
+      <div className="row-gap">
+        <button className="outline-btn" onClick={testChime} data-testid="sound-test-button" disabled={!cfg.enabled}><Volume2 size={14}/> Tes Chime</button>
+        <button className="primary-btn" onClick={save} data-testid="save-sound-config"><Check size={14}/> Simpan</button>
+      </div>
+    </div>
+    <div className="form-fields" style={{ gridTemplateColumns: "1fr 1fr", marginTop: 12 }}>
+      <label><input type="checkbox" checked={cfg.chime_new_order} onChange={(e) => setCfg({ ...cfg, chime_new_order: e.target.checked })} data-testid="chime-new-order-toggle" disabled={!cfg.enabled} /> <span>🔔 Bunyikan saat pesanan online baru masuk</span></label>
+      <label><input type="checkbox" checked={cfg.chime_kds_ready} onChange={(e) => setCfg({ ...cfg, chime_kds_ready: e.target.checked })} data-testid="chime-kds-toggle" disabled={!cfg.enabled} /> <span>👨‍🍳 Bunyikan saat pesanan KDS "Siap diambil"</span></label>
     </div>
   </section>;
 }

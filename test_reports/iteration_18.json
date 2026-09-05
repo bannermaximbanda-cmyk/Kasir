@@ -1,0 +1,37 @@
+{
+  "summary": "Backend regression for Batch C (Vendor Settlement Center, Advanced Inventory Stock Movements, Excel bulk import, Sound Settings) + regression on Sales/Analytics/SelfOrder-accept concurrency. 14 tests passed, 1 skipped. 100% pass on executed tests.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET https://kupi-kasir-pro.preview.emergentagent.com/api/*", "issue": "Transient 502 (Cloudflare) observed on first-run login. Recovered on retry within 2s. Added retry-with-backoff in login helper. Likely cold-start / ingress warmup, not code."},
+      {"endpoint": "POST /api/products/bulk-import", "issue": "Row with name='' is caught by explicit guard (returns errors[]), but no case for name=null (Pydantic would reject → 422). Acceptable. Also, admin isolation forces outlet but silently overrides — logging or returning a warning per-row would be helpful."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration19_batch_c.py",
+    "/app/test_reports/pytest/iter19.xml"
+  ],
+  "action_items": [
+    "Consider adding an outlet-isolation seed for tests so admin ≠ super_admin outlet, to fully exercise POST /api/inventory/stock-movements 403 path (currently skipped because admin & product share outlet-sudirman).",
+    "Bulk-import: consider returning per-row 'forced_outlet' info so admins know their outlet_id was overridden."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 2467 lines — split into routers (settlement.py, inventory.py, sales.py, auth.py). Exceeds the >700-line guideline.",
+    "_compute_settlement_breakdown does not filter by outlet inside merchant_map, but scope filter only applies to Sale query — acceptable (correct scope) but merchants without sales in scope still appear implicitly only via sales; OK.",
+    "adjust_stock (line 687) writes both StockLog and StockMovement in the SAME commit — good. But bulk-import does NOT write StockMovement rows for created/updated products; if that's expected for imports it's fine, otherwise stock audit trail loses those changes.",
+    "create_sale iterates products with N+1 SELECT for stock deduction (line 914). For large tickets consider batch fetch by IN clause.",
+    "settlement/preview requires Admin+ role but /settlement/payouts POST allows Admin too — verify business rule (should possibly be Super Admin only for actual payout creation).",
+    "POST /settings has no key whitelist — any Admin/Super Admin can overwrite any key including bank-accounts, feature flags, etc. Consider a permitted-keys allowlist."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration19_batch_c.py (new)"
+  ],
+  "success_rate": {"backend": "100% (14/14 executed, 1 skipped due to seed constraints)", "frontend": "N/A (not requested)"},
+  "test_credentials": "superadmin/.Superadmin1_, admin/MjdKupi#2026, kasir/MjdKupi#2026 (from review request). CSRF header X-Requested-With: mjd-kupi required for state-changing endpoints — verified.",
+  "seed_data_creation": "Test data prefixed with TEST_ where possible (products, payouts note, table names). Not cleaned up automatically — safe as merchant sales history is only appended.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Batch C endpoints fully validated: /api/settlement/{preview,payouts} (GET+POST), /api/inventory/stock-movements (GET+POST with kinds in/out/opname/adjust), /api/products/bulk-import (upsert mode + admin outlet isolation), /api/settings key=sound_config. POS regression confirms StockMovement(kind='sale', ref_id=sale.id, delta<0) is written per sale line. Self-order accept concurrency guard returns 409 on 2nd click (atomic UPDATE...WHERE status IN pending). Note: admin & kasir default to outlet-sudirman in seed → cross-outlet 403 for stock-movements is untested; bulk-import isolation IS tested and works. Total tests: 15 (14 pass, 1 skip).",
+  "rca of the issue": "N/A — all Batch C features functioning as designed."
+}

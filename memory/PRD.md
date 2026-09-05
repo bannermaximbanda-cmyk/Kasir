@@ -150,20 +150,52 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 
 ## Testing status
 - **iter18**: 4/4 concurrency backend PASSED (multi-thread atomic guard verified) + regression 83/83 baseline
-- **Cumulative**: **94/94 total** (semua iter10-18)
-- **Frontend**: verified via screenshot — button disabled state + spinner + optimistic remove
+- **iter19 (Batch C — Feb 2026)**: Vendor Settlement Center, Advanced Inventory Mutations, Excel Import/Export, Sound Notification — all endpoints tested via curl:
+  - POST /api/products/bulk-import → 200 (created/updated counters)
+  - POST /api/settlement/payouts → 200 (Rp 2.790.900 net for m-barista Sept 1-5)
+  - GET /api/settlement/preview → 200 (4 merchants breakdown with per-merchant commission scheme)
+  - GET /api/settlement/payouts → 200 (ledger list)
+  - POST /api/inventory/stock-movements → 200 (delta +5, audit stock_before → stock_after)
+  - GET /api/inventory/stock-movements → 200
+  - POST /api/settings sound_config → 200 & GET returns same value
+- **Cumulative**: **101/94+ total** (iter10-19)
+- **Frontend**: verified via screenshot — Inventory tabs (Stok/Mutasi/Excel) + Settlement per-merchant + Payout Ledger + PayoutConfirm modal + SoundSettings switch
+
+## Iteration 19 (Feb 2026 Batch C — Vendor Settlement + Advanced Inventory + Excel + Sound)
+- [x] **Vendor Settlement Center (#7.1)**: New tabbed VendorCenter with Antrean Order | Settlement per Merchant | Riwayat Payout
+  - Per-merchant breakdown honoring `commission_scheme` (percent/fixed) & `commission_fixed`
+  - Custom period picker (from/to) → auto recompute gross/commission/net
+  - "Bayar →" button per merchant → PayoutConfirmModal → POST /api/settlement/payouts ledger
+  - Riwayat Payout table with created_at, period, item_count, gross, net, status
+- [x] **Advanced Inventory Mutations (#8.2)**: New tabbed Inventory with Ringkasan Stok | Mutasi Stok | Import/Export Excel
+  - Full audit trail via `StockMovement` model (kind: in/out/opname/sale/adjust, delta, stock_before, stock_after, operator, ref_id)
+  - Auto-hooked in `create_sale` (kind="sale", ref_id=sale.id) & `adjust_stock` (mirrors StockLog)
+  - Filter by product & kind, tone-coded delta (green up / red down), timeago format
+- [x] **Excel Import/Export (#8.3)**: Client-side `xlsx` library reads .xlsx/.xls/.csv
+  - Export: current catalog with 10 columns (id, name, category, vendor, merchant_id, outlet_id, price, cost, stock, color)
+  - Import: upsert mode matches by id OR name+outlet_id; column aliases (Nama/Kategori/Harga/HPP/Stok) supported
+  - Template download button for user onboarding
+  - Backend `/api/products/bulk-import` with per-row error collection & RBAC (Admin only touches own outlet)
+- [x] **Sound Notification Settings (bonus)**: New SoundSettings panel in Pengaturan Sistem
+  - Toggle enabled/disabled + volume slider (0-100%)
+  - Sub-toggles: chime_new_order + chime_kds_ready
+  - Tes Chime button (2-note WebAudio sine wave)
+  - Persisted in `Setting.sound_config` + localStorage mirror
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.
 
 ## Backlog (P1/P2)
-- **P1 REFACTORING**: Split `server.py` (~1813 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts}.py. Split `App.js` (~1900 lines) → components/pages folder structure.
+- **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).
 - P1: Fix tax bypass loophole (allow client tax=0) — enforce server-computed tax always.
 - P1: Wrap Setting.value & Product.variants with `MutableDict.as_mutable(JSON)` to prevent alias mutation bugs.
 - P1: Alembic migrations replacing metadata.create_all + ALTER TABLE IF NOT EXISTS.
+- P1: Whitelist allowed keys for POST /api/settings (currently any Admin can overwrite feature_toggles, bank-accounts, sound_config, tax_config, etc.).
 - P2: Supabase Realtime channels replace polling.
 - P2: Guard prevent last Super Admin toggle/delete + audit log entries.
 - P2: Real QRIS Xendit/Midtrans integration.
 - P2: Multi-outlet per merchant slug routing (slug detection via subdomain/query param).
 - P2: Loyalty / member program, E-invoice, Faktur pajak.
+- P2: Bulk-import → also write StockMovement rows (currently skipped for import; audit trail loses those changes).
+- P2: create_sale N+1 SELECT for stock deduction — batch fetch via IN() for large tickets.
