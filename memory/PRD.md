@@ -161,7 +161,15 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - **Cumulative**: **101/94+ total** (iter10-19)
 - **Frontend**: verified via screenshot — Inventory tabs (Stok/Mutasi/Excel) + Settlement per-merchant + Payout Ledger + PayoutConfirm modal + SoundSettings switch
 
-## Iteration 21 (Feb 2026 — POS & Self-Order Pagination + Fixed Scroll Container)
+## Iteration 22 (Feb 2026 — Dynamic Branding Text + Real-Time Feature Access Control)
+- [x] **Dynamic Branding Text (Nama + Subtitle)**: `<BrandingTextSettings/>` component di Pengaturan Sistem (Super Admin only) dengan input Nama Usaha & Subtitle/Tagline + preview live. Disimpan sebagai `Setting.branding_text = {name, subtitle}`.
+- [x] **Dynamic rendering**: Sidebar brand-text, topbar breadcrumb, dan login screen (nama + tagline uppercase + tombol "Masuk ke {brand}") semuanya membaca `brandingText` state — di-fetch pada mount + auto-update via `onBrandingTextSaved` callback tanpa reload.
+- [x] **Fix Feature Toggle Bug #1 (Key Mismatch)**: `FEATURE_LIST` diselaraskan dengan `NAV_ITEMS` id (`self-service`, `vendor-center`, dst) + tambah entry `overview` & `printer` yang sebelumnya hilang. Sekarang toggle benar-benar match saat filter sidebar.
+- [x] **Fix Feature Toggle Bug #2 (No Real-Time Sync)**: Save handler `FeatureToggleMatrix` sekarang trigger callback `onFeatureToggleSaved` yang re-fetch `/api/feature-toggles` di App state → `featureMatrix` refresh langsung → `isFeatureAllowed()` sidebar filter langsung diperbarui tanpa perlu logout.
+- [x] **UX quick-actions**: Tombol "Aktifkan Semua" & "Matikan Semua" per target (role/outlet) untuk konfigurasi lebih cepat.
+- [x] **Verified via screenshot**: Save "Warung Kopi Bang Jul · Ngopi Yuk!" → sidebar, topbar, login page update real-time; Save Vendor role dengan hanya KDS ON → login sebagai Vendor menampilkan sidebar **satu item saja (Kitchen Display)**.
+
+
 - [x] **Fixed viewport container**: `.menu-scroll` (POS) & `.csa-scroll` (Self-Order) dengan `max-height: calc(100vh - Xpx)` + `overflow-y: auto`. Header, search bar, category tabs, dan cart panel tetap terlihat penuh saat browsing menu.
 - [x] **Pagination bar reusable** (`<PaginationBar/>`): "Menampilkan X-Y dari Z menu" + tombol `‹ Sebelumnya`, page numbers with ellipsis (contoh: `[1] [2] [3] … [10]`), `Selanjutnya ›`. Active page highlighted vibrant orange.
 - [x] **`usePagination` hook**: default 12 items/page, auto-reset ke page 1 saat search query / kategori berubah / total items berubah (dependency array).

@@ -73,6 +73,7 @@ function AdminApp() {
   const [sidebar, setSidebar] = useState(false);
   const [collapsed, setCollapsed] = useState(() => (typeof window !== "undefined" && localStorage.getItem("mjd_sidebar_collapsed") === "1"));
   const [branding, setBranding] = useState({ name: "MJD Kupi", theme_color: "#f97316", logo_url: "", banner_url: "" });
+  const [brandingText, setBrandingText] = useState({ name: "MJD Kupi", subtitle: "Retail Command Center" });
   const [featureMatrix, setFeatureMatrix] = useState({}); // { "role:Kasir": {pos:true, kds:false}, "outlet:x": {...} }
   const [taxConfig, setTaxConfig] = useState({ enabled: false, percent: 0 });
   const [notifications, setNotifications] = useState({ items: [], unread_count: 0 });
@@ -149,6 +150,9 @@ function AdminApp() {
       } catch {}
     }).catch(() => {});
     axios.get(`${API}/feature-toggles`).then(({ data }) => setFeatureMatrix(data?.matrix || {})).catch(() => {});
+    axios.get(`${API}/settings/branding_text`).then(({ data }) => {
+      if (data && typeof data === "object" && (data.name || data.subtitle)) setBrandingText({ name: data.name || "MJD Kupi", subtitle: data.subtitle || "Retail Command Center" });
+    }).catch(() => {});
     axios.get(`${API}/settings/tax_config`).then(({ data }) => {
       if (data && typeof data === "object") setTaxConfig({ enabled: !!data.enabled, percent: Number(data.percent || 0) });
     }).catch(() => {});
@@ -267,7 +271,7 @@ function AdminApp() {
       <aside className={`sidebar ${sidebar ? "is-open" : ""} ${collapsed ? "collapsed" : ""}`} data-testid="main-sidebar">
         <div className="brand">
           <div className="brand-mark" data-testid="brand-logo">{(branding.logo_url || brandLogo) ? <img src={branding.logo_url || brandLogo} alt="logo" /> : <Coffee size={19} />}</div>
-          <div className="brand-text"><strong>{branding.name || "MJD Kupi"}</strong><span>Retail Command Center</span></div>
+          <div className="brand-text"><strong data-testid="brand-name">{brandingText.name || "MJD Kupi"}</strong><span data-testid="brand-subtitle">{brandingText.subtitle || "Retail Command Center"}</span></div>
           <button className="collapse-toggle" data-testid="collapse-sidebar-button" onClick={toggleCollapsed} title={collapsed ? "Perluas sidebar" : "Ciutkan sidebar"}>
             <Menu size={16} />
           </button>
@@ -314,7 +318,7 @@ function AdminApp() {
       <main className="main-content">
         <header className="topbar">
           <button className="mobile-menu" data-testid="open-sidebar-button" onClick={() => setSidebar(true)}><Menu size={20} /></button>
-          <div className="breadcrumb"><span>MJD Kupi</span><b>/</b><strong>{pageTitle}</strong></div>
+          <div className="breadcrumb"><span data-testid="breadcrumb-brand">{brandingText.name || "MJD Kupi"}</span><b>/</b><strong>{pageTitle}</strong></div>
           <div className="top-actions">
             <div className="merchant-switch" data-testid="outlet-switcher-wrapper">
               <Building2 size={16} />
@@ -364,7 +368,7 @@ function AdminApp() {
           {page === "tables" && <Tables notify={notify} activeOutlet={activeOutlet} branding={branding} />}
           {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} outlets={outlets} />}
           {page === "vendor-center" && <VendorCenter notify={notify} />}
-          {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} role={session.role} />}
+          {page === "settings" && <SettingsPage notify={notify} printerRef={printerRef} role={session.role} brandingText={brandingText} onBrandingTextSaved={(v) => setBrandingText(v)} onFeatureToggleSaved={() => axios.get(`${API}/feature-toggles`).then(({ data }) => setFeatureMatrix(data?.matrix || {})).catch(() => {})} />}
           {page === "printer" && <PrinterSettings notify={notify} />}
         </div>
         {showNotif && <NotificationDrawer notif={notifications} onClose={() => setShowNotif(false)}
@@ -1977,7 +1981,7 @@ function PayoutConfirmModal({ entry, period, onClose, onConfirm }) {
 }
 
 // -------- Settings (Printer + Branding + Outlets, Super Admin only) --------
-function SettingsPage({ notify, role }) {
+function SettingsPage({ notify, role, brandingText, onBrandingTextSaved, onFeatureToggleSaved }) {
   const [printer, setPrinter] = useState({ size: "58mm", auto_print: true, split_kitchen: true, device: "Bluetooth" });
   const [logo, setLogo] = useState("");
   const [outlets, setOutlets] = useState([]);
@@ -2030,6 +2034,7 @@ function SettingsPage({ notify, role }) {
     </section>
 
     {isSuper && <>
+      <BrandingTextSettings notify={notify} initial={brandingText} onSaved={onBrandingTextSaved} />
       <section className="panel product-form-v2">
         <div className="form-heading"><div className="form-icon"><ImageIcon size={18} /></div>
           <div><h2>Logo usaha</h2><span>Otomatis muncul di Navbar, Dashboard, dan Struk Thermal</span></div>
@@ -2071,8 +2076,35 @@ function SettingsPage({ notify, role }) {
     {(role === "Super Admin" || role === "Admin") && <TaxSettings notify={notify} />}
     {(role === "Super Admin" || role === "Admin") && <SoundSettings notify={notify} />}
     {(role === "Super Admin" || role === "Admin") && <PinGenerator notify={notify} />}
-    {isSuper && <FeatureToggleMatrix notify={notify} outlets={outlets} />}
+    {isSuper && <FeatureToggleMatrix notify={notify} outlets={outlets} onSaved={onFeatureToggleSaved} />}
   </>;
+}
+
+// -------- Branding Text Settings (Brand Name + Subtitle) --------
+function BrandingTextSettings({ notify, initial, onSaved }) {
+  const [form, setForm] = useState({ name: initial?.name || "MJD Kupi", subtitle: initial?.subtitle || "Retail Command Center" });
+  useEffect(() => { setForm({ name: initial?.name || "MJD Kupi", subtitle: initial?.subtitle || "Retail Command Center" }); }, [initial?.name, initial?.subtitle]);
+  const save = async () => {
+    const payload = { name: form.name.trim() || "MJD Kupi", subtitle: form.subtitle.trim() || "Retail Command Center" };
+    try {
+      await axios.post(`${API}/settings`, { key: "branding_text", value: payload });
+      if (onSaved) onSaved(payload);
+      notify(`Brand diperbarui: ${payload.name} · ${payload.subtitle}`);
+    } catch (e) { notify(e.response?.data?.detail || "Gagal simpan branding"); }
+  };
+  return <section className="panel product-form-v2" data-testid="branding-text-panel">
+    <div className="form-heading"><div className="form-icon"><Store size={18}/></div>
+      <div><h2>Identitas Brand</h2><span>Nama & tagline muncul di sidebar, topbar, login, dan struk</span></div>
+    </div>
+    <div className="form-fields" style={{ gridTemplateColumns: "1fr 1.4fr auto" }}>
+      <label><span>Nama Usaha / Brand</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="MJD Kupi" data-testid="branding-name-input" /></label>
+      <label><span>Subtitle / Tagline</span><input value={form.subtitle} onChange={(e) => setForm({ ...form, subtitle: e.target.value })} placeholder="Retail Command Center" data-testid="branding-subtitle-input" /></label>
+      <button className="primary-btn" onClick={save} data-testid="save-branding-text-button"><Check size={14}/> Simpan Brand</button>
+    </div>
+    <div className="empty-hint" style={{ marginTop: 8, background: "#fff7ed", color: "#9a3412" }}>
+      Preview: <b>{form.name}</b> · <em>{form.subtitle}</em>
+    </div>
+  </section>;
 }
 
 // -------- PPN / Tax Settings (Feature #7.3) --------
@@ -2172,22 +2204,24 @@ function SoundSettings({ notify }) {
 // -------- Feature Toggle Matrix (Super Admin only) --------
 const ROLE_LIST = ["Super Admin", "Admin", "Kasir", "Vendor"];
 const FEATURE_LIST = [
+  { key: "overview", label: "Ringkasan Dashboard" },
   { key: "pos", label: "Terminal POS" },
-  { key: "self_order", label: "Customer Self-Order" },
+  { key: "self-service", label: "Customer Self-Order" },
   { key: "kds", label: "Kitchen Display (KDS)" },
   { key: "inventory", label: "Inventori & Stok" },
   { key: "expenses", label: "Pengeluaran" },
   { key: "reports", label: "Laporan Keuangan" },
   { key: "products", label: "Produk & HPP" },
-  { key: "merchants", label: "Merchant/Tenant" },
+  { key: "merchants", label: "Merchant / Tenant" },
   { key: "cashiers", label: "Monitoring Kasir" },
   { key: "tables", label: "QR Meja" },
-  { key: "vendor_center", label: "Pusat Vendor" },
+  { key: "vendor-center", label: "Pusat Vendor" },
   { key: "users", label: "User & Security" },
+  { key: "printer", label: "Pengaturan Printer" },
   { key: "settings", label: "Pengaturan Sistem" },
 ];
 
-function FeatureToggleMatrix({ notify, outlets }) {
+function FeatureToggleMatrix({ notify, outlets, onSaved }) {
   const [matrix, setMatrix] = useState({});
   const [mode, setMode] = useState("role"); // role | outlet
   const [target, setTarget] = useState("Kasir");
@@ -2205,13 +2239,18 @@ function FeatureToggleMatrix({ notify, outlets }) {
     cur[fkey] = cur[fkey] === false ? true : false;
     return { ...m, [key]: cur };
   });
+  const allOn = () => setMatrix((m) => ({ ...m, [key]: Object.fromEntries(FEATURE_LIST.map(f => [f.key, true])) }));
+  const allOff = () => setMatrix((m) => ({ ...m, [key]: Object.fromEntries(FEATURE_LIST.map(f => [f.key, false])) }));
   const save = async () => {
-    try { await axios.post(`${API}/feature-toggles`, { matrix }); notify("Feature toggles tersimpan — akan berlaku setelah user login berikutnya"); }
-    catch (e) { notify(e.response?.data?.detail || "Gagal simpan"); }
+    try {
+      await axios.post(`${API}/feature-toggles`, { matrix });
+      notify("Feature toggles tersimpan — sidebar akan langsung diperbarui");
+      if (onSaved) onSaved();
+    } catch (e) { notify(e.response?.data?.detail || "Gagal simpan"); }
   };
   return <section className="panel product-form-v2" data-testid="feature-toggle-panel">
     <div className="form-heading"><div className="form-icon"><Shield size={18}/></div>
-      <div><h2>Feature Access Control</h2><span>Aktif/Non-aktifkan modul per Role atau per Outlet</span></div>
+      <div><h2>Feature Access Control</h2><span>Aktif/Non-aktifkan modul per Role atau per Outlet — sidebar user akan otomatis filter</span></div>
     </div>
     <div className="ft-tabs">
       <button className={mode === "role" ? "active" : ""} onClick={() => setMode("role")} data-testid="ft-mode-role">Per Role</button>
@@ -2220,12 +2259,14 @@ function FeatureToggleMatrix({ notify, outlets }) {
         {mode === "role" ? ROLE_LIST.map(r => <option key={r}>{r}</option>)
                         : (outlets || []).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
       </select>
+      <button className="outline-btn" onClick={allOn} data-testid="ft-all-on" style={{ marginLeft: 8 }}>Aktifkan Semua</button>
+      <button className="outline-btn" onClick={allOff} data-testid="ft-all-off">Matikan Semua</button>
     </div>
     <div className="ft-grid">
       {FEATURE_LIST.map((f) => {
         const on = scope[f.key] !== false;
         return <label key={f.key} className={`ft-cell ${on ? "on" : "off"}`} data-testid={`ft-${f.key}`}>
-          <input type="checkbox" checked={on} onChange={() => toggle(f.key)} />
+          <input type="checkbox" checked={on} onChange={() => toggle(f.key)} data-testid={`ft-toggle-${f.key}`} />
           <b>{f.label}</b>
           <span>{on ? "Aktif" : "Nonaktif"}</span>
         </label>;
@@ -3028,6 +3069,12 @@ function Login({ onLogin }) {
   const [password, setPassword] = useState(".Superadmin1_");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [brand, setBrand] = useState({ name: "MJD Kupi", subtitle: "Retail Command Center" });
+  useEffect(() => {
+    axios.get(`${API}/settings/branding_text`).then(({ data }) => {
+      if (data && (data.name || data.subtitle)) setBrand({ name: data.name || "MJD Kupi", subtitle: data.subtitle || "Retail Command Center" });
+    }).catch(() => {});
+  }, []);
   const submit = async (event) => {
     event.preventDefault(); setBusy(true); setError("");
     try { const { data } = await axios.post(`${API}/auth/login`, { email, password }); onLogin(data); }
@@ -3036,8 +3083,8 @@ function Login({ onLogin }) {
   };
   return <div className="login-screen" data-testid="login-screen">
     <div className="login-art">
-      <div className="login-brand"><div className="brand-mark"><Coffee size={19} /></div><strong>MJD Kupi</strong></div>
-      <div><div className="eyebrow">RETAIL COMMAND CENTER</div><h1>Satu ruang untuk<br /><em>operasi yang lancar.</em></h1><p>POS, inventori, KDS, dan payout vendor dalam satu workspace.</p></div>
+      <div className="login-brand"><div className="brand-mark"><Coffee size={19} /></div><strong data-testid="login-brand-name">{brand.name}</strong></div>
+      <div><div className="eyebrow" data-testid="login-brand-subtitle">{brand.subtitle.toUpperCase()}</div><h1>Satu ruang untuk<br /><em>operasi yang lancar.</em></h1><p>POS, inventori, KDS, dan payout vendor dalam satu workspace.</p></div>
       <div className="login-orbit"><Coffee size={64} /></div>
     </div>
     <form className="login-form" onSubmit={submit}>
@@ -3047,7 +3094,7 @@ function Login({ onLogin }) {
       <label>Username / Email<input value={email} onChange={(e) => setEmail(e.target.value)} data-testid="login-email-input" /></label>
       <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" data-testid="login-password-input" /></label>
       {error && <div className="login-error" data-testid="login-error">{error}</div>}
-      <button className="primary-btn full" disabled={busy} data-testid="login-submit-button">{busy ? "Memeriksa…" : "Masuk ke MJD Kupi"}<span>→</span></button>
+      <button className="primary-btn full" disabled={busy} data-testid="login-submit-button">{busy ? "Memeriksa…" : `Masuk ke ${brand.name}`}<span>→</span></button>
       <div className="demo-accounts">
         <b>Akun demo cepat</b>
         <button type="button" onClick={() => { setEmail("superadmin"); setPassword(".Superadmin1_"); }} data-testid="demo-admin-button">Super Admin</button>
