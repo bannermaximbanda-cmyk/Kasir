@@ -151,7 +151,6 @@ function AdminApp() {
     const loadNotif = () => axios.get(`${API}/notifications`, { params: { outlet_id: activeOutlet !== "all" ? activeOutlet : undefined } }).then(({ data }) => setNotifications(data)).catch(() => {});
     loadNotif();
     const notifTimer = setInterval(loadNotif, 15000);
-    return () => clearInterval(notifTimer);
     if (session.role === "Kasir") reloadShift();
     // Setup WebAudio chime
     chimeRef.current = () => {
@@ -164,12 +163,16 @@ function AdminApp() {
         setTimeout(() => { o.stop(); ctx.close(); }, 380);
       } catch {}
     };
-    // Poll online orders only for cashier/admin
+    // Poll online orders every 4s for cashier/admin/super
+    let onlineTimer = null;
     if (["Kasir", "Admin", "Super Admin"].includes(session.role)) {
       reloadOnlineOrders();
-      const t = setInterval(reloadOnlineOrders, 4000);
-      return () => clearInterval(t);
+      onlineTimer = setInterval(reloadOnlineOrders, 4000);
     }
+    return () => {
+      clearInterval(notifTimer);
+      if (onlineTimer) clearInterval(onlineTimer);
+    };
   }, [session]);
 
   useEffect(() => {
@@ -361,7 +364,16 @@ function AdminApp() {
         </div>
         {showNotif && <NotificationDrawer notif={notifications} onClose={() => setShowNotif(false)}
           setPage={(p) => { setShowNotif(false); setPage(p); }}
-          onOrderClick={(o) => { setShowNotif(false); setPage("pos"); setShowOnlineOrders(true); }}
+          onOrderClick={(n) => {
+            // Extract order UUID from notif id e.g. "order:a0927bdb-...."
+            const orderId = String(n.id || "").replace(/^order:/, "");
+            setShowNotif(false); setPage("pos"); setShowOnlineOrders(true);
+            // Highlight the clicked order after modal opens
+            setTimeout(() => {
+              const el = document.querySelector(`[data-testid='online-item-${orderId}']`);
+              if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("highlight-flash"); setTimeout(() => el.classList.remove("highlight-flash"), 2500); }
+            }, 500);
+          }}
           onMarkAll={() => setNotifications({ ...notifications, unread_count: 0 })} />}
       </main>
 

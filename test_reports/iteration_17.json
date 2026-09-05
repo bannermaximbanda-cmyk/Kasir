@@ -1,0 +1,24 @@
+{
+  "summary": "Iteration 17 backend testing verifying /api/notifications (type=order) and /api/pos/online-orders return consistent order IDs (zero divergence). Root cause of user-reported bug was a frontend polling bug (already fixed by E1); backend was and remains correct. Wrote 7 new alignment tests; all pass. Full sequential regression across iter10+iter11+iter12+iter13+iter15+iter16+iter17 = 83 passed, 1 skipped, 0 failed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration17_notif_pos_alignment.py",
+    "/app/test_reports/pytest/iter17_results.xml",
+    "/app/test_reports/pytest/iter17_full_regression.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:1002 /notifications includes SelfOrder.status IN ['pending', 'Pesanan Diterima'] whereas /pos/online-orders (line 1638) uses ['Pesanan Diterima', 'Menunggu kasir', 'Menunggu konfirmasi'] — the sets do NOT match. If any future self-order is written with status 'pending', it would appear in notif but NOT in POS modal, reproducing the exact user bug at the data layer. Recommend unifying both queries via a shared constant like PENDING_SELF_ORDER_STATUSES.",
+    "server.py:1093-1146 /self-order sets status='Pesanan Diterima' consistently, so today the two endpoints DO align in practice, but the divergent status lists are a latent risk.",
+    "server.py file is 2115 lines — should be split into routers (still applies from iter16 review)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration17_notif_pos_alignment.py"],
+  "success_rate": {"backend": "100% (7/7 iter17 + 83/83 regression, 1 skip)", "frontend": "not tested (backend-only per request)"},
+  "test_credentials": "kasir / MjdKupi#2026, superadmin / .Superadmin1_ (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "TEST_ITER17_* self-orders (auto-cleanup fixture attempted; may be no-op due to module path mismatch — non-blocking).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter17 confirms zero divergence between /api/notifications type=order and /api/pos/online-orders for the SAME kasir/outlet scope. New self-orders default to 'Pesanan Diterima' and appear in both endpoints within 1s. Accept transitions status to 'paid' which correctly removes it from POS queue. RBAC verified (sudirman kasir sees only sudirman). One latent risk flagged: /notifications also accepts legacy status='pending' which /pos/online-orders does not — recommend unifying status sets in a shared constant.",
+  "rca of the issue": "User bug 'Notification says new order, POS modal says 0 antrean' was NOT a backend divergence bug. Backend endpoints /api/notifications (type=order) and /api/pos/online-orders return identical order IDs for pending self-orders in scope (verified by iter17). Root cause was a frontend polling bug: a premature `return` inside a useEffect prevented the reloadOnlineOrders setInterval from ever starting, so the modal state stayed at its initial empty array even though the notification bell was polled independently. E1 fixed frontend (App.js:128-175); backend needed no change. Iter17 codifies the alignment contract to prevent future regressions."
+}

@@ -781,3 +781,10 @@
 .quick-nominal button.active { background: var(--orange); color: #fff; border-color: var(--orange); }
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Highlight flash for notif-clicked order */
+.highlight-flash { animation: flashHi 2.5s ease-out; }
+@keyframes flashHi {
+  0%, 20% { background: #fff0e6; box-shadow: 0 0 0 3px var(--orange); }
+  100% { background: transparent; box-shadow: 0 0 0 0 transparent; }
+}

@@ -133,15 +133,17 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - [x] **Shift Context Card**: Kasir Aktif (Dina Kasir), Outlet (Outlet Sudirman), Waktu Mulai (Sabtu, 5 Sept 2026 · 04.34 WIB) — gradien orange
 - [x] **Loading state**: Tombol submit disabled + spinner "Membuka shift…" saat request
 
+### Iteration 17 (Feb 2026 — Notification/POS Query Alignment)
+- [x] **BUG FIX (frontend root cause)**: `useEffect` di App.js line 128-175 punya premature `return` yang menghentikan setup polling `reloadOnlineOrders` — akibatnya modal Pesanan Online SELAMANYA menampilkan array kosong meski data ada di backend.
+- [x] **Fix**: Konsolidasi return cleanup — semua timer (notif + online orders) dibersihkan di satu return handler
+- [x] **Notification click → auto-scroll ke order** dengan flash highlight animation
+- [x] **Preventive**: Extracted `PENDING_SELF_ORDER_STATUSES` shared constant untuk mencegah divergensi status filter di masa depan
+- [x] **Dual action buttons**: [Tolak Pesanan] + [Terima & Kirim ke Dapur] di modal Pesanan Online
+
 ## Testing status
-- **iter10**: 25/25 backend PASSED
-- **iter11**: 15/15 backend PASSED
-- **iter12**: 9/9 backend PASSED
-- **iter13-14**: 8/8 backend PASSED
-- **iter15**: 12/12 backend PASSED (1 skip)
-- **iter16**: 7/7 backend PASSED (Buka Shift bug end-to-end verified)
-- **Regression**: **76/76 total** when run sequentially
-- **Frontend**: verified via screenshot — Modal Buka Shift dengan context card, quick nominal, IDR mask
+- **iter17**: 7/7 backend + 83/83 regression = **90/90 total** semua LULUS
+- **RCA confirmed by testing_agent**: Backend selalu benar (zero divergence antara /notifications & /pos/online-orders). Bug murni di frontend polling.
+- **Frontend**: verified via screenshot — modal Pesanan Online menampilkan 13 antrean termasuk #A0927BDB dengan highlight flash
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.

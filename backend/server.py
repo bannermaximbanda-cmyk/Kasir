@@ -999,7 +999,7 @@ async def get_notifications(
             "action": "cashiers",
         })
     # Pending self-orders (last 24h, not yet accepted)
-    so_stmt = select(M.SelfOrder).where(M.SelfOrder.status.in_(["pending", "Pesanan Diterima"]), M.SelfOrder.created_at >= since)
+    so_stmt = select(M.SelfOrder).where(M.SelfOrder.status.in_(PENDING_SELF_ORDER_STATUSES), M.SelfOrder.created_at >= since)
     if scope: so_stmt = so_stmt.where(M.SelfOrder.outlet_id == scope)
     orders = (await db.execute(so_stmt.order_by(M.SelfOrder.created_at.desc()).limit(10))).scalars().all()
     for o in orders:
@@ -1015,6 +1015,11 @@ async def get_notifications(
     items.sort(key=lambda x: x["created_at"], reverse=True)
     items = items[:10]
     return {"items": items, "unread_count": len(items)}
+
+
+# Shared constant: all statuses that represent an ACTIVE pending self-order queue.
+# Used by both /notifications (type=order) and /pos/online-orders to guarantee zero divergence.
+PENDING_SELF_ORDER_STATUSES = ["Pesanan Diterima", "Menunggu kasir", "Menunggu konfirmasi", "pending", "pending_cashier_approval"]
 
 
 @api_router.get("/dashboard/analytics")
@@ -1635,7 +1640,7 @@ async def pos_online_orders(
     """Antrean pesanan dari QR meja self-order yang belum di-approve kasir."""
     stmt = (
         select(M.SelfOrder)
-        .where(M.SelfOrder.status.in_(["Pesanan Diterima", "Menunggu kasir", "Menunggu konfirmasi"]))
+        .where(M.SelfOrder.status.in_(PENDING_SELF_ORDER_STATUSES))
         .order_by(M.SelfOrder.created_at.desc())
         .limit(100)
     )
