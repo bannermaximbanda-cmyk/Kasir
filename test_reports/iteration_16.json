@@ -1,0 +1,22 @@
+{
+  "summary": "Iteration 16 backend testing for 'Buka Shift Kasir' bug fix. Verified: (1) POST /api/shifts/open with clean numeric payload succeeds, (2) auth-driven cashier_id/outlet_id cannot be spoofed by client, (3) duplicate-open returns 400 with detail containing 'aktif', (4) GET /api/shifts/current returns existing open shift, (5) close-then-reopen flow works. All 7 new iter16 tests pass, and full regression across iter10-15 passes (69 passed, 1 skipped as before).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration16_shift_open_bug.py",
+    "/app/test_reports/pytest/iter16_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:1495 falls back to hardcoded 'outlet-sudirman' when user.outlet_id is None — consider raising 400 instead so seed drift doesn't silently misassign shifts.",
+    "server.py backend file is 2115 lines — should be split into routers (shifts, sales, users, etc.) per code review guideline (>700 line threshold)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration16_shift_open_bug.py"],
+  "success_rate": {"backend": "100% (7/7 iter16 + 69/69 regression)", "frontend": "not tested (backend only per request)"},
+  "test_credentials": "kasir / MjdKupi#2026 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — used existing kasir account; all created shifts closed at end of run.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter16 bug fix for Buka Shift Kasir verified end-to-end. Backend was unchanged; frontend now sanitizes IDR string → Number and catches errors with toast. Test file test_iteration16_shift_open_bug.py includes idempotent cleanup (close any open shift before/after). Safe to include in future regression runs.",
+  "rca of the issue": "Root cause was frontend sending IDR-formatted string like 'Rp 500.000' as opening_cash, which failed Pydantic int validation → 422/400. Backend /api/shifts/open always required only {opening_cash, note} (int + str), deriving cashier_id and outlet_id from JWT. Frontend fix: sanitize to Number before POST and wrap in try/catch to show toast. Verified: clean numeric payload succeeds (200), spoofed cashier_id/outlet_id in payload are ignored (JWT wins), duplicate open returns 400 detail 'Shift aktif masih terbuka', close→reopen works."
+}

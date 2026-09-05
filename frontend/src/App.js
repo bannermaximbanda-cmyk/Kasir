@@ -366,7 +366,9 @@ function AdminApp() {
       </main>
 
       {toast && <div className="toast" data-testid="toast-message"><span>✓</span>{toast}</div>}
-      {showShiftOpen && <ShiftOpenModal onClose={() => setShowShiftOpen(false)} onOpened={(s) => { setShift(s); setShowShiftOpen(false); notify("Shift berhasil dibuka"); }} />}
+      {showShiftOpen && <ShiftOpenModal session={session} activeOutlet={activeOutlet} outlets={outlets} notify={notify}
+        onClose={() => setShowShiftOpen(false)}
+        onOpened={(s) => { setShift(s); setShowShiftOpen(false); notify("Shift berhasil dibuka"); }} />}
       {showShiftClose && shift && <ShiftCloseModal shift={shift} onClose={() => setShowShiftClose(false)} onClosed={(rep) => { setShift(null); setShowShiftClose(false); setShiftReport(rep); notify(`Shift ditutup. Selisih ${money(rep.shift.variance)}`); }} />}
       {showPayment && <PaymentModal total={total} onClose={() => setShowPayment(false)} onConfirm={confirmSale} />}
       {showReceipt && lastSale && <ReceiptModal sale={lastSale} merchants={merchants} outlets={outlets} cashier={session?.name || ""} onClose={() => { setShowReceipt(false); setLastSale(null); setCart([]); }} notify={notify} />}
@@ -1753,20 +1755,66 @@ function UserManagement({ notify }) {
 }
 
 // -------- Shift modals --------
-function ShiftOpenModal({ onClose, onOpened }) {
+function ShiftOpenModal({ onClose, onOpened, session, activeOutlet, outlets, notify }) {
   const [cash, setCash] = useState(500000);
   const [note, setNote] = useState("");
-  const submit = async () => { const { data } = await axios.post(`${API}/shifts/open`, { opening_cash: Number(cash), note }); onOpened(data); };
-  return <div className="modal-backdrop"><div className="pay-modal" data-testid="shift-open-modal">
+  const [submitting, setSubmitting] = useState(false);
+  const formatIDR = (v) => {
+    const num = String(v).replace(/[^0-9]/g, "");
+    return num ? `Rp ${Number(num).toLocaleString("id-ID")}` : "";
+  };
+  const parseIDR = (v) => Number(String(v).replace(/[^0-9]/g, "")) || 0;
+  const outletName = outlets?.find((o) => o.id === (session?.outlet_id || activeOutlet))?.name || session?.outlet_id || "Outlet Sudirman";
+  const now = new Date();
+  const dateLabel = now.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const timeLabel = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+  const QUICK = [100000, 200000, 500000, 1000000];
+  const submit = async () => {
+    const opening = parseIDR(cash);
+    if (opening <= 0) { notify?.("Kas awal wajib diisi (minimal Rp 1)"); return; }
+    setSubmitting(true);
+    try {
+      const { data } = await axios.post(`${API}/shifts/open`, { opening_cash: opening, note: note.trim() });
+      onOpened(data);
+    } catch (e) {
+      const detail = e.response?.data?.detail || e.message || "Gagal buka shift. Coba lagi.";
+      // If existing shift is open, try to reuse it
+      if (e.response?.status === 400 && /aktif|open/i.test(detail)) {
+        try {
+          const { data: sh } = await axios.get(`${API}/shifts/current`);
+          if (sh && sh.id) { notify?.("Shift kamu masih aktif — melanjutkan sesi"); onOpened(sh); return; }
+        } catch {}
+      }
+      notify?.(`❌ ${detail}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return <div className="modal-backdrop"><div className="pay-modal shift-modal" data-testid="shift-open-modal">
     <button className="modal-close" onClick={onClose}><X size={18} /></button>
-    <div className="pay-head"><h2>Buka shift kasir</h2><span>Masukkan kas awal drawer</span></div>
+    <div className="pay-head"><h2>Buka shift kasir</h2><span>Konfirmasi kas awal drawer & mulai sesi</span></div>
+    <div className="shift-context" data-testid="shift-context-card">
+      <div className="sc-row"><div className="sc-icon"><UserCheck size={14}/></div><div><small>Kasir Aktif</small><b>{session?.name || "Kasir"}</b></div></div>
+      <div className="sc-row"><div className="sc-icon"><Building2 size={14}/></div><div><small>Outlet</small><b>{outletName}</b></div></div>
+      <div className="sc-row"><div className="sc-icon"><PlayCircle size={14}/></div><div><small>Waktu Mulai</small><b>{dateLabel} · {timeLabel} WIB</b></div></div>
+    </div>
     <div className="pay-body">
       <label>Kas awal (Rp)</label>
-      <input type="number" value={cash} onChange={(e) => setCash(e.target.value)} onFocus={numOnFocus} data-testid="shift-open-cash-input" />
+      <input type="text" inputMode="numeric" value={formatIDR(cash)} onChange={(e) => setCash(parseIDR(e.target.value))} onFocus={(e) => e.target.select()} placeholder="Rp 500.000" data-testid="shift-open-cash-input" />
+      <div className="quick-nominal" data-testid="quick-nominal">
+        {QUICK.map((n) => (
+          <button type="button" key={n} className={parseIDR(cash) === n ? "active" : ""} onClick={() => setCash(n)} data-testid={`quick-nominal-${n}`}>
+            Rp {(n / 1000).toLocaleString("id-ID")}{n >= 1000000 ? "" : "rb"}
+            {n >= 1000000 && ".000"}
+          </button>
+        ))}
+      </div>
       <label>Catatan (opsional)</label>
-      <input value={note} onChange={(e) => setNote(e.target.value)} data-testid="shift-open-note-input" />
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Contoh: shift pagi, uang recehan diambil dulu" data-testid="shift-open-note-input" />
     </div>
-    <button className="primary-btn full" onClick={submit} data-testid="shift-open-submit"><PlayCircle size={14}/> Mulai shift</button>
+    <button className="primary-btn full" disabled={submitting} onClick={submit} data-testid="shift-open-submit">
+      {submitting ? <><RefreshCw size={14} className="spin"/> Membuka shift…</> : <><PlayCircle size={14}/> Mulai shift · Rp {parseIDR(cash).toLocaleString("id-ID")}</>}
+    </button>
   </div></div>;
 }
 function ShiftCloseModal({ shift, onClose, onClosed }) {

@@ -123,14 +123,25 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - [x] **Customer Self-Order Outlet Picker**: Header dropdown yang bisa switch outlet on-the-fly, fetch menu+banner+status outlet baru dinamis
 - [x] **UI POS Online Orders enhanced**: Menampilkan customer_name + phone badge, variant chip, notes, tombol "Tolak Pesanan" + "Terima & Kirim ke Dapur" (bukan lagi 1 tombol)
 
+### Iteration 16 (Feb 2026 — Buka Shift Bug Fix + Modal UI/UX)
+- [x] **BUG FIX Buka Shift 400 error (root cause)**: Frontend mengirim IDR-formatted string ("Rp 500.000") → Pydantic int validation gagal
+- [x] **Frontend sanitize**: `parseIDR()` helper strip semua non-digit sebelum kirim `Number`
+- [x] **Try/catch + Toast friendly**: Tidak lagi runtime error overlay; menampilkan pesan Indonesia
+- [x] **Idempotency**: Kalau shift sudah aktif, otomatis fetch `/shifts/current` dan reuse (bukan blokir user)
+- [x] **Auto-format IDR mask**: Typing "500000" jadi "Rp 500.000" real-time
+- [x] **Quick Nominal buttons**: [Rp 100rb] [Rp 200rb] [Rp 500rb] [Rp 1.000.000] dengan state active
+- [x] **Shift Context Card**: Kasir Aktif (Dina Kasir), Outlet (Outlet Sudirman), Waktu Mulai (Sabtu, 5 Sept 2026 · 04.34 WIB) — gradien orange
+- [x] **Loading state**: Tombol submit disabled + spinner "Membuka shift…" saat request
+
 ## Testing status
 - **iter10**: 25/25 backend PASSED
 - **iter11**: 15/15 backend PASSED
 - **iter12**: 9/9 backend PASSED
-- **iter13-14**: 8/8 backend PASSED + 3 critical bugs fixed
-- **iter15**: 12/12 (1 skip for empty seed) + 57/57 regression = **69/69 total**
-- **Bug user reported CONFIRMED FIXED** dan dites end-to-end (kasir Dina @ outlet-sudirman melihat order #34956F85 di queue)
-- **Frontend**: verified via screenshot — Self-Service Studio (all 4 panels), Outlet picker, Marquee preview, Customer outlet picker
+- **iter13-14**: 8/8 backend PASSED
+- **iter15**: 12/12 backend PASSED (1 skip)
+- **iter16**: 7/7 backend PASSED (Buka Shift bug end-to-end verified)
+- **Regression**: **76/76 total** when run sequentially
+- **Frontend**: verified via screenshot — Modal Buka Shift dengan context card, quick nominal, IDR mask
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.

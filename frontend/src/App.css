@@ -767,3 +767,17 @@
   .ss-grid { grid-template-columns: 1fr; }
   .ss-media-row { grid-template-columns: 1fr; }
 }
+
+/* Shift open modal enhancements */
+.shift-modal { max-width: 460px; }
+.shift-context { display: grid; gap: 10px; padding: 14px; background: linear-gradient(135deg, #fff8f3 0%, #fff 100%); border: 1px dashed #fed7aa; border-radius: 10px; margin: 12px 0 4px; }
+.sc-row { display: flex; gap: 12px; align-items: center; }
+.sc-icon { width: 30px; height: 30px; background: var(--orange); color: #fff; border-radius: 8px; display: grid; place-items: center; flex-shrink: 0; }
+.sc-row small { display: block; font-size: 10px; color: #8b96a3; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+.sc-row b { display: block; font-size: 13px; color: var(--ink); margin-top: 1px; }
+.quick-nominal { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 8px 0 4px; }
+.quick-nominal button { border: 1px solid var(--line); background: #fff; color: #596574; padding: 8px 4px; border-radius: 6px; font-size: 10px; font-weight: 700; cursor: pointer; transition: all .15s; }
+.quick-nominal button:hover { border-color: var(--orange); color: var(--orange-dark); }
+.quick-nominal button.active { background: var(--orange); color: #fff; border-color: var(--orange); }
+.spin { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
