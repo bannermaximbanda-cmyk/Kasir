@@ -362,8 +362,8 @@ function AdminApp() {
           {page === "expenses" && <Expenses expenses={expenses} reload={reloadExpenses} notify={notify} session={session} shift={shift} />}
           {page === "products" && <Products products={products} merchants={merchants} reload={reloadProducts} notify={notify} />}
           {page === "merchants" && <Merchants merchants={merchants} reload={reloadMerchants} notify={notify} />}
-          {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} />}
-          {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} pinDisabled={!isFeatureAllowed("cashier_pin")} />}
+          {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} pinDisabled={!isFeatureAllowed("cashier_pin")} />}
+          {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} />}
           {page === "reports" && <Reports products={products} expenses={expenses} />}
           {page === "tables" && <Tables notify={notify} activeOutlet={activeOutlet} branding={branding} />}
           {page === "self-service" && <SelfService products={products} notify={notify} activeOutlet={activeOutlet} outlets={outlets} />}
@@ -2381,7 +2381,7 @@ function PinGenerator({ notify, disabled }) {
     </div>
   </section>;
 }
-function UserManagement({ notify, pinDisabled }) {
+function UserManagement({ notify }) {
   const [users, setUsers] = useState([]);
   const [outlets, setOutlets] = useState([]);
   const [reveal, setReveal] = useState({});
@@ -2404,9 +2404,8 @@ function UserManagement({ notify, pinDisabled }) {
   const toggle = async (id) => { await axios.patch(`${API}/admin/users/${id}/toggle`); load(); };
   const remove = async (u) => { if (!window.confirm(`Hapus user ${u.name}?`)) return; try { await axios.delete(`${API}/admin/users/${u.id}`); load(); notify("User dihapus"); } catch (e) { notify(e.response?.data?.detail || "Gagal"); } };
   return <>
-    <SectionHeader eyebrow="SECURITY · SUPER ADMIN" title="Manajemen User & Security" description="Kelola akun, reset password, kode otorisasi kasir, dan kredensial user."
+    <SectionHeader eyebrow="SECURITY · SUPER ADMIN" title="Manajemen User & Security" description="Kelola akun, reset password, lihat kredensial semua user."
       action={<div className="live-pill"><i /> {users.length} akun aktif</div>} />
-    <PinGenerator notify={notify} disabled={pinDisabled} />
     <div className="panel product-form-v2">
       <div className="form-heading"><div className="form-icon"><Shield size={18} /></div><div><h2>Tambah user baru</h2><span>Password akan disimpan agar Super Admin dapat memulihkannya</span></div></div>
       <div className="form-fields" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr auto" }}>
@@ -2686,7 +2685,7 @@ function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
 }
 
 // -------- Cashier Monitor (Admin) --------
-function CashierMonitor({ notify, onView }) {
+function CashierMonitor({ notify, onView, pinDisabled }) {
   const [shifts, setShifts] = useState([]);
   const load = () => axios.get(`${API}/shifts`).then(({ data }) => setShifts(data)).catch(() => {});
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
@@ -2694,8 +2693,9 @@ function CashierMonitor({ notify, onView }) {
   const openCount = shifts.filter((s) => s.status === "open").length;
   const totalOmset = shifts.reduce((a, s) => a + (s.total_cash || 0) + (s.total_transfer || 0), 0);
   return <>
-    <SectionHeader eyebrow="AUDIT KASIR" title="Monitoring shift kasir" description="Pantau seluruh kasir yang sedang aktif dan riwayat shift real-time."
+    <SectionHeader eyebrow="AUDIT KASIR" title="Monitoring shift kasir" description="Pantau kasir aktif, riwayat shift, dan generate kode otorisasi untuk approve void/edit."
       action={<button className="outline-btn" onClick={load} data-testid="refresh-cashiers-button"><Bell size={14}/> Refresh</button>} />
+    <PinGenerator notify={notify} disabled={pinDisabled} />
     <div className="metric-grid three">
       <Metric label="Shift aktif" value={openCount} change="kasir sedang bekerja" tone="orange" icon={UserCheck} />
       <Metric label="Total shift" value={shifts.length} change="dalam 50 shift terakhir" tone="blue" icon={ClipboardList} />
@@ -3094,8 +3094,8 @@ function HistoryModal({ onClose, notify }) {
 
 // -------- Login --------
 function Login({ onLogin }) {
-  const [email, setEmail] = useState("superadmin");
-  const [password, setPassword] = useState(".Superadmin1_");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [brand, setBrand] = useState({ name: "MJD Kupi", subtitle: "Retail Command Center" });
@@ -3105,9 +3105,11 @@ function Login({ onLogin }) {
     }).catch(() => {});
   }, []);
   const submit = async (event) => {
-    event.preventDefault(); setBusy(true); setError("");
-    try { const { data } = await axios.post(`${API}/auth/login`, { email, password }); onLogin(data); }
-    catch (e) { setError(e.response?.data?.detail || "Login gagal."); }
+    event.preventDefault();
+    if (!email.trim() || !password) { setError("Username / Email dan Password wajib diisi."); return; }
+    setBusy(true); setError("");
+    try { const { data } = await axios.post(`${API}/auth/login`, { email: email.trim(), password }); onLogin(data); }
+    catch (e) { setError(e.response?.data?.detail || "Login gagal. Periksa kembali kredensial Anda."); }
     finally { setBusy(false); }
   };
   return <div className="login-screen" data-testid="login-screen">
@@ -3116,21 +3118,14 @@ function Login({ onLogin }) {
       <div><div className="eyebrow" data-testid="login-brand-subtitle">{brand.subtitle.toUpperCase()}</div><h1>Satu ruang untuk<br /><em>operasi yang lancar.</em></h1><p>POS, inventori, KDS, dan payout vendor dalam satu workspace.</p></div>
       <div className="login-orbit"><Coffee size={64} /></div>
     </div>
-    <form className="login-form" onSubmit={submit}>
+    <form className="login-form" onSubmit={submit} autoComplete="on">
       <div className="eyebrow">WELCOME BACK</div>
       <h2>Masuk ke workspace</h2>
-      <p>Gunakan username atau email untuk login.</p>
-      <label>Username / Email<input value={email} onChange={(e) => setEmail(e.target.value)} data-testid="login-email-input" /></label>
-      <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" data-testid="login-password-input" /></label>
+      <p>Masukkan username atau email dan password yang telah terdaftar.</p>
+      <label>Username / Email<input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="username atau email" autoComplete="username" data-testid="login-email-input" /></label>
+      <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="Masukkan password" autoComplete="current-password" data-testid="login-password-input" /></label>
       {error && <div className="login-error" data-testid="login-error">{error}</div>}
       <button className="primary-btn full" disabled={busy} data-testid="login-submit-button">{busy ? "Memeriksa…" : `Masuk ke ${brand.name}`}<span>→</span></button>
-      <div className="demo-accounts">
-        <b>Akun demo cepat</b>
-        <button type="button" onClick={() => { setEmail("superadmin"); setPassword(".Superadmin1_"); }} data-testid="demo-admin-button">Super Admin</button>
-        <button type="button" onClick={() => { setEmail("admin"); setPassword("MjdKupi#2026"); }} data-testid="demo-manager-button">Admin</button>
-        <button type="button" onClick={() => { setEmail("kasir"); setPassword("MjdKupi#2026"); }} data-testid="demo-kasir-button">Kasir</button>
-        <button type="button" onClick={() => { setEmail("vendor"); setPassword("MjdKupi#2026"); }} data-testid="demo-vendor-button">Vendor</button>
-      </div>
     </form>
   </div>;
 }

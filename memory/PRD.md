@@ -161,7 +161,12 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 - **Cumulative**: **101/94+ total** (iter10-19)
 - **Frontend**: verified via screenshot — Inventory tabs (Stok/Mutasi/Excel) + Settlement per-merchant + Payout Ledger + PayoutConfirm modal + SoundSettings switch
 
-## Iteration 23 (Feb 2026 — Printer Customization + Merchant Fixed Commission + PIN Feature Toggle)
+## Iteration 24 (Feb 2026 — PIN Relocation to Cashier Monitoring + Production Login Hardening)
+- [x] **Relocate Kode Otorisasi Kasir**: `<PinGenerator/>` dihapus dari page "User & Security" (fokus CRUD user saja), dipindah ke **Monitoring Kasir** di atas metric grid. Section header diperbarui: "Pantau kasir aktif, riwayat shift, dan generate kode otorisasi untuk approve void/edit." Fungsionalitas generate 15-min PIN tetap berjalan dari lokasi baru (verified: ZF727B generated).
+- [x] **Remove Quick Demo Accounts (Production Hardening)**: Blok `.demo-accounts` dengan 4 tombol preset (Super Admin/Admin/Kasir/Vendor) **completely removed**. Login state default `email` & `password` sekarang kosong string — mencegah one-click access di production. Placeholder helpful "username atau email" / "Masukkan password" + autocomplete `username`/`current-password` untuk password manager compat. Empty submit sekarang tampilkan error "Username / Email dan Password wajib diisi." + trim `email` sebelum kirim ke backend.
+- [x] **Verified via screenshot**: (1) Login page bersih tanpa demo section, (2) User & Security tidak ada PIN card, (3) Monitoring Kasir menampilkan PIN card di top + generate button functional.
+
+
 - [x] **Printer Settings — Kustomisasi Struk**: Panel baru "Kustomisasi Struk" dengan:
   - Logo upload (PNG/JPG) → auto-resize + threshold @128 grayscale → **monokrom bitmap** siap ESC/POS
   - Rekomendasi label dinamis: "Maks lebar 384px (58mm) / 576px (80mm)" mengikuti pilihan kertas
