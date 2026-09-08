@@ -296,7 +296,20 @@ async def login(payload: LoginInput, response: Response, db: AsyncSession = Depe
     q = select(M.User).where((M.User.email == identifier) | (M.User.username == identifier))
     result = await db.execute(q)
     user = result.scalar_one_or_none()
-    if not user or not bcrypt.checkpw(payload.password.encode(), user.password_hash.encode()):
+    if not user:
+        raise HTTPException(status_code=401, detail="Email/username atau password salah")
+    # Gracefully handle corrupt bcrypt hash: attempt fallback via plain_password (seed only) & self-heal
+    try:
+        ok = bcrypt.checkpw(payload.password.encode(), (user.password_hash or "").encode())
+    except (ValueError, Exception):
+        ok = False
+    if not ok:
+        # Self-heal: if password_hash is invalid/corrupt but plain_password matches, rotate hash
+        if user.plain_password and payload.password == user.plain_password:
+            user.password_hash = bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode()
+            await db.commit()
+            ok = True
+    if not ok:
         raise HTTPException(status_code=401, detail="Email/username atau password salah")
     if user.active is False:
         raise HTTPException(status_code=403, detail="Akun dinonaktifkan")
@@ -2433,8 +2446,18 @@ async def bootstrap():
                     existing.username = username; changed = True
                 if not existing.plain_password:
                     existing.plain_password = password; changed = True
-                # Also rotate super admin password to new spec
-                if username == "superadmin" and not bcrypt.checkpw(password.encode(), existing.password_hash.encode()):
+                # Force reset password_hash if corrupt (invalid bcrypt salt from earlier env-expansion bug)
+                # OR rotate super admin to new spec.
+                needs_rotate = False
+                try:
+                    if username == "superadmin" and not bcrypt.checkpw(password.encode(), existing.password_hash.encode()):
+                        needs_rotate = True
+                    # Additionally: validate hash format
+                    if not existing.password_hash or not existing.password_hash.startswith("$2"):
+                        needs_rotate = True
+                except (ValueError, Exception):
+                    needs_rotate = True
+                if needs_rotate:
                     existing.password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
                     existing.plain_password = password
                     changed = True
