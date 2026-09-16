@@ -72,7 +72,7 @@ class Product(Base):
     __tablename__ = "mjd_products"
     id = Column(String(36), primary_key=True, default=gen_uuid)
     merchant_id = Column(String(36), ForeignKey("mjd_merchants.id", ondelete="SET NULL"), index=True, nullable=True)
-    outlet_id = Column(String(36), index=True, default="outlet-sudirman")
+    outlet_id = Column(String(36), index=True, nullable=True)  # NULL ⇒ "Berlaku di semua outlet"
     name = Column(String(180), nullable=False)
     category = Column(String(64), default="Lain-lain")
     vendor = Column(String(120), default="MJD Kupi")

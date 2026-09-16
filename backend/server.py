@@ -73,7 +73,7 @@ class ProductInput(BaseModel):
     category: str = "Lain-lain"
     vendor: str = "MJD Kupi"
     merchant_id: Optional[str] = None
-    outlet_id: str = "outlet-sudirman"
+    outlet_id: Optional[str] = None  # None/empty ⇒ "Berlaku di semua outlet" (Super Admin only)
     price: float = 0
     cost: float = 0
     stock: int = 0
@@ -695,14 +695,14 @@ async def create_product(
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     # Admin can only create products for their own outlet; Super Admin can create for any outlet OR global (outlet_id=None)
-    # payload.outlet_id explicitly None or "" ⇒ "Berlaku di semua outlet" (Super Admin only)
-    is_global = payload.outlet_id in (None, "", "all") and user.role == "Super Admin"
-    if is_global:
+    # payload.outlet_id explicitly None or "" or "all" ⇒ "Berlaku di semua outlet" (Super Admin only)
+    global_intent = payload.outlet_id in (None, "", "all")
+    if global_intent:
+        if user.role != "Super Admin":
+            raise HTTPException(status_code=400, detail="Hanya Super Admin yang boleh membuat produk 'Berlaku di semua outlet'")
         outlet_id = None
     else:
-        outlet_id = payload.outlet_id or user.outlet_id
-        if not outlet_id:
-            raise HTTPException(status_code=400, detail="outlet_id wajib atau tandai 'Berlaku di semua outlet' (Super Admin)")
+        outlet_id = payload.outlet_id
         if user.role == "Admin" and outlet_id != user.outlet_id:
             raise HTTPException(status_code=403, detail="Admin hanya boleh produk outletnya sendiri")
     product = M.Product(
@@ -2452,6 +2452,8 @@ async def bootstrap():
             "ALTER TABLE mjd_outlets ADD COLUMN IF NOT EXISTS phone VARCHAR(32) DEFAULT ''",
             "ALTER TABLE mjd_users ADD COLUMN IF NOT EXISTS merchant_id VARCHAR(36)",
             "ALTER TABLE mjd_products ADD COLUMN IF NOT EXISTS outlet_id VARCHAR(36) DEFAULT 'outlet-sudirman'",
+            "ALTER TABLE mjd_products ALTER COLUMN outlet_id DROP NOT NULL",
+            "ALTER TABLE mjd_products ALTER COLUMN outlet_id DROP DEFAULT",
             "ALTER TABLE mjd_stock_logs ADD COLUMN IF NOT EXISTS outlet_id VARCHAR(36) DEFAULT 'outlet-sudirman'",
             "ALTER TABLE mjd_stock_logs ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
             "ALTER TABLE mjd_stock_logs ADD COLUMN IF NOT EXISTS user_name VARCHAR(120) DEFAULT ''",
