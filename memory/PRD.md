@@ -262,8 +262,29 @@ See `/app/memory/test_credentials.md`.
 - [x] **Real-time sync via BroadcastChannel**: `PaymentModal` mendengarkan `payment-settings-updated` — perubahan bank/QRIS di `PaymentSettings` langsung tercermin di modal kasir tanpa reload.
 - [x] **Offline fallback**: LocalStorage cache `app_payment_settings_{outletId}` diprioritaskan untuk render instan + badge "📴 Data pembayaran outlet dari cache offline" saat network fail.
 - [x] **Reference format**: Transfer method sekarang menyimpan reference sebagai `{bank}-{account} · {ref}` sehingga struk & rekonsiliasi lebih informatif.
-- [x] **Bug fix (compile blocker)**: `SettingsPage` menghapus prop `outlets` duplikat yang bentrok dengan state internal (`const [outlets, setOutlets] = useState([])`), memperbaiki ESLint parsing error yang muncul saat iter25.
-- [x] **Verified via screenshot**: Cash tab tampil dengan outlet name di header; Transfer tanpa bank menampilkan warning; Transfer dengan 2 bank (BCA & Mandiri) switch dropdown → kartu update instan; QRIS fallback QR muncul + upload proof.
+- [x] **Bug fix (compile blocker)**: `SettingsPage` menghapus prop `outlets` duplikat yang bentrok dengan state internal.
+
+## Iteration 27 (Feb 2026 — CRITICAL FIX: PaymentSettings Outlet Mismatch)
+**Bug**: Saat Super Admin memilih "MJD Banda Aceh" di dropdown, data rekening & QRIS malah tersimpan ke "MJD Sudirman"; label upload & note tetap menampilkan Sudirman.
+**Root causes**:
+1. **Backend** `POST /api/settings/bank-accounts` diam-diam fallback ke `user.outlet_id` bila `outlet_id` param kosong → Super Admin selalu menyimpan ke outletnya sendiri (Sudirman).
+2. **Frontend** `outletName` diambil dari prop `outlets` (mungkin kosong/stale) alih-alih dari `availableOutlets` (source-of-truth dropdown), sehingga label tak sinkron dengan pilihan aktif.
+3. Tidak ada broadcast saat load selesai → POS di outlet lain tak tahu data outletnya sudah berubah.
+
+**Fixes**:
+- [x] **Backend hardening**: Super Admin WAJIB kirim `outlet_id` eksplisit (400 bila kosong / spasi). Admin tetap fallback ke outletnya sendiri. Endpoint sekarang juga validasi outlet exists + `active=true`.
+- [x] **Frontend**:
+  - Rename `outletId` → `selectedOutletId` (per user request), dengan initializer dari localStorage + validasi outlet masih valid di `availableOutlets`.
+  - `activeOutletName` di-derive dari `availableOutlets` (dropdown source) dengan fallback → selalu match dengan pilihan visual.
+  - `switchOutlet(nextId)` explicit handler — reset `banks`/`qrisImg`/`form`/`fileInputKey` sebelum load supaya tidak ada stale UI.
+  - `add()`, `remove()`, `handleQris()` capture `oid = selectedOutletId` di awal async — nolkan risiko stale closure. `outlet_id` juga dikirim di body sebagai double-safety.
+  - `load()` menerima `targetOutletId` argument + guard untuk discard result kalau user sudah pindah outlet lagi selama fetch (anti-race).
+  - Setiap load → broadcast `payment-settings-updated { outlet_id, accounts, qris }` supaya POS di outlet manapun langsung sinkron.
+  - `<input type=file key={fileInputKey}>` — force remount saat outlet switch supaya file lama tak tercarry.
+  - Badge "📍 {NamaOutlet}" + attribut `data-active-outlet` + id outlet tercetak di hint untuk transparansi & QA.
+  - Tombol "Tambah" & "Upload QRIS" sekarang menampilkan nama outlet aktif secara eksplisit dan disabled bila outlet belum valid.
+- [x] **Verified via curl (backend isolation)**: Super Admin → POST BSI ke `outlet-banda-aceh` sukses; GET Banda Aceh return BSI; GET Sudirman TIDAK terkontaminasi (masih Bank Aceh original). Super Admin tanpa outlet_id → 400 dengan pesan Indonesia jelas.
+- [x] **Verified via screenshot (UI binding)**: Switch dropdown "MJD Sudirman" → "MJD Banda Aceh" secara real-time mengubah: badge, tombol "Tambah ke {nama}", label "Upload QRIS untuk {nama}", hint id outlet, dan daftar rekening (Bank Aceh Sudirman → BSI Banda Aceh) — 100% sinkron.
 
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.

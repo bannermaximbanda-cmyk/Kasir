@@ -2234,11 +2234,26 @@ async def add_bank_account(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
-    outlet = outlet_id or user.outlet_id
-    if not outlet:
-        raise HTTPException(status_code=400, detail="outlet_id wajib")
-    if user.role == "Admin" and outlet != user.outlet_id:
-        raise HTTPException(status_code=403, detail="Admin hanya bisa atur rekening outletnya sendiri")
+    # Explicit outlet_id required for Super Admin (no silent fallback to user.outlet_id).
+    # Admin (single-outlet role) may omit — falls back to their own outlet.
+    explicit = (outlet_id or "").strip()
+    if user.role == "Super Admin":
+        if not explicit:
+            raise HTTPException(status_code=400, detail="outlet_id wajib untuk Super Admin — pilih outlet dulu di dropdown")
+        outlet = explicit
+    else:  # Admin
+        outlet = explicit or (user.outlet_id or "")
+        if not outlet:
+            raise HTTPException(status_code=400, detail="outlet_id wajib")
+        if outlet != user.outlet_id:
+            raise HTTPException(status_code=403, detail="Admin hanya bisa atur rekening outletnya sendiri")
+    # Guard: outlet must exist and be active
+    o = await db.execute(select(M.Outlet).where(M.Outlet.id == outlet))
+    outlet_row = o.scalar_one_or_none()
+    if not outlet_row:
+        raise HTTPException(status_code=404, detail=f"Outlet '{outlet}' tidak ditemukan")
+    if getattr(outlet_row, "active", True) is False:
+        raise HTTPException(status_code=400, detail=f"Outlet '{outlet_row.name}' sudah dinonaktifkan")
     key = f"bank-accounts:{outlet}"
     r = await db.execute(select(M.Setting).where(M.Setting.key == key))
     row = r.scalar_one_or_none()
@@ -2261,11 +2276,17 @@ async def delete_bank_account(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
-    outlet = outlet_id or user.outlet_id
-    if not outlet:
-        raise HTTPException(status_code=400, detail="outlet_id wajib")
-    if user.role == "Admin" and outlet != user.outlet_id:
-        raise HTTPException(status_code=403, detail="Admin hanya bisa atur rekening outletnya sendiri")
+    explicit = (outlet_id or "").strip()
+    if user.role == "Super Admin":
+        if not explicit:
+            raise HTTPException(status_code=400, detail="outlet_id wajib untuk Super Admin")
+        outlet = explicit
+    else:
+        outlet = explicit or (user.outlet_id or "")
+        if not outlet:
+            raise HTTPException(status_code=400, detail="outlet_id wajib")
+        if outlet != user.outlet_id:
+            raise HTTPException(status_code=403, detail="Admin hanya bisa atur rekening outletnya sendiri")
     key = f"bank-accounts:{outlet}"
     r = await db.execute(select(M.Setting).where(M.Setting.key == key))
     row = r.scalar_one_or_none()

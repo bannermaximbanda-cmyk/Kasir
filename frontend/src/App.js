@@ -2567,75 +2567,112 @@ function PaymentSettings({ notify, outlets = [], session }) {
     if (session?.outlet_id) return active.filter((o) => o.id === session.outlet_id);
     return active;
   }, [outlets, session]);
-  const [outletId, setOutletId] = useState(() => {
+  // Persisted per-session outlet pick (Super Admin can switch freely)
+  const [selectedOutletId, setSelectedOutletId] = useState(() => {
     try { return localStorage.getItem("mjd_payment_outlet") || session?.outlet_id || ""; } catch { return session?.outlet_id || ""; }
   });
-  useEffect(() => { if (!outletId && availableOutlets.length) setOutletId(availableOutlets[0].id); }, [availableOutlets, outletId]);
-  useEffect(() => { try { if (outletId) localStorage.setItem("mjd_payment_outlet", outletId); } catch {} }, [outletId]);
+  // If persisted id is not in available list (e.g. deleted / different account) — auto-fallback to first available.
+  useEffect(() => {
+    if (!availableOutlets.length) return;
+    const stillValid = availableOutlets.some((o) => o.id === selectedOutletId);
+    if (!stillValid) setSelectedOutletId(availableOutlets[0].id);
+  }, [availableOutlets, selectedOutletId]);
+  useEffect(() => { try { if (selectedOutletId) localStorage.setItem("mjd_payment_outlet", selectedOutletId); } catch {} }, [selectedOutletId]);
 
   const [banks, setBanks] = useState([]);
   const [form, setForm] = useState({ bank_name: "", account_number: "", holder_name: "" });
   const [qrisImg, setQrisImg] = useState("");
+  const [fileInputKey, setFileInputKey] = useState(0); // force-remount <input type=file> on outlet switch
   const [status, setStatus] = useState(""); // "saving" | "saved" | "error" | ""
   const [busyAdd, runAdd] = useAsyncAction();
   const [busyQris, runQris] = useAsyncAction();
-  const outletName = useMemo(() => (outlets.find((o) => o.id === outletId)?.name) || outletId, [outlets, outletId]);
-  const STORAGE_KEY = outletId ? `app_payment_settings_${outletId}` : null;
+  // Derive name from the dropdown source-of-truth (availableOutlets) so it ALWAYS matches the visible selection.
+  const activeOutletName = useMemo(() => {
+    const found = availableOutlets.find((o) => o.id === selectedOutletId) || (outlets || []).find((o) => o.id === selectedOutletId);
+    return found?.name || selectedOutletId || "—";
+  }, [availableOutlets, outlets, selectedOutletId]);
+  const STORAGE_KEY = selectedOutletId ? `app_payment_settings_${selectedOutletId}` : null;
 
-  const load = async () => {
-    if (!outletId) return;
+  // Explicit switch handler: reset transient UI state (form/banks/qris) BEFORE loading new outlet
+  const switchOutlet = (nextId) => {
+    if (!nextId || nextId === selectedOutletId) return;
+    setSelectedOutletId(nextId);
+    setBanks([]);
+    setQrisImg("");
+    setForm({ bank_name: "", account_number: "", holder_name: "" });
+    setFileInputKey((k) => k + 1);
+    setStatus("loading");
+  };
+
+  const load = async (targetOutletId) => {
+    const oid = targetOutletId || selectedOutletId;
+    if (!oid) return;
+    const storageKey = `app_payment_settings_${oid}`;
     setStatus("loading");
     try {
       const [banksRes, qrisRes] = await Promise.all([
-        axios.get(`${API}/settings/bank-accounts?outlet_id=${encodeURIComponent(outletId)}`),
-        axios.get(`${API}/settings/qris-image:${encodeURIComponent(outletId)}`).catch(() => ({ data: {} })),
+        axios.get(`${API}/settings/bank-accounts?outlet_id=${encodeURIComponent(oid)}`),
+        axios.get(`${API}/settings/qris-image:${encodeURIComponent(oid)}`).catch(() => ({ data: {} })),
       ]);
       const accs = banksRes.data?.accounts || [];
       const qris = qrisRes.data?.image || "";
+      // Discard result if user switched again while we were loading
+      if (oid !== selectedOutletId && targetOutletId !== oid) return;
       setBanks(accs);
       setQrisImg(qris);
-      try { if (STORAGE_KEY) localStorage.setItem(STORAGE_KEY, JSON.stringify({ accounts: accs, qris, ts: Date.now() })); } catch {}
+      try { localStorage.setItem(storageKey, JSON.stringify({ accounts: accs, qris, ts: Date.now() })); } catch {}
+      // Broadcast to POS + other tabs so they reload with fresh data
+      broadcast("payment-settings-updated", { outlet_id: oid, accounts: accs, qris });
       setStatus("saved");
     } catch (e) {
-      // Offline / API down → try LocalStorage restore
       try {
-        const cache = STORAGE_KEY ? JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") : null;
+        const cache = JSON.parse(localStorage.getItem(storageKey) || "null");
         if (cache) { setBanks(cache.accounts || []); setQrisImg(cache.qris || ""); setStatus("offline"); return; }
       } catch {}
       setStatus("error");
     }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [outletId]);
+  useEffect(() => { load(selectedOutletId); /* eslint-disable-next-line */ }, [selectedOutletId]);
   // Cross-tab realtime: listen for updates from other tabs / POS
-  useEffect(() => onBusMessage("payment-settings-updated", (p) => { if (p?.outlet_id === outletId) load(); }), [outletId]);
+  useEffect(() => onBusMessage("payment-settings-updated", (p) => {
+    if (p?.outlet_id === selectedOutletId) load(selectedOutletId);
+  }), [selectedOutletId]);
 
-  const persistLocal = (accs, qris) => {
-    try { if (STORAGE_KEY) localStorage.setItem(STORAGE_KEY, JSON.stringify({ accounts: accs, qris, ts: Date.now() })); } catch {}
+  const persistLocal = (accs, qris, oid) => {
+    try { const key = `app_payment_settings_${oid}`; localStorage.setItem(key, JSON.stringify({ accounts: accs, qris, ts: Date.now() })); } catch {}
   };
 
   const add = () => runAdd(async () => {
-    if (!outletId) return notify("Pilih outlet dulu");
+    const oid = selectedOutletId; // capture at click-time to eliminate stale-closure risk
+    if (!oid) return notify("Pilih outlet dulu");
     if (!form.bank_name || !form.account_number || !form.holder_name) return notify("Lengkapi data rekening");
     setStatus("saving");
     try {
-      const { data } = await axios.post(`${API}/settings/bank-accounts?outlet_id=${encodeURIComponent(outletId)}`, form);
-      setBanks(data.accounts || []);
-      persistLocal(data.accounts || [], qrisImg);
-      broadcast("payment-settings-updated", { outlet_id: outletId, accounts: data.accounts });
+      const { data } = await axios.post(
+        `${API}/settings/bank-accounts?outlet_id=${encodeURIComponent(oid)}`,
+        { ...form, outlet_id: oid } // double-safety: outlet_id also in body
+      );
+      // Only reflect banks in UI if user still viewing same outlet
+      if (oid === selectedOutletId) setBanks(data.accounts || []);
+      persistLocal(data.accounts || [], qrisImg, oid);
+      broadcast("payment-settings-updated", { outlet_id: oid, accounts: data.accounts, qris: qrisImg });
       setForm({ bank_name: "", account_number: "", holder_name: "" });
       setStatus("saved");
-      notify(`✅ Rekening ${form.bank_name} ditambahkan ke ${outletName}`);
+      const oname = (availableOutlets.find((o) => o.id === oid) || (outlets || []).find((o) => o.id === oid))?.name || oid;
+      notify(`✅ Rekening ${form.bank_name} ditambahkan ke ${oname}`);
     } catch (e) { setStatus("error"); notify(`❌ ${e.response?.data?.detail || "Gagal menambahkan"}`); }
   });
 
   const remove = (id, label) => runAdd(async () => {
+    const oid = selectedOutletId;
+    if (!oid) return notify("Pilih outlet dulu");
     if (!window.confirm(`Hapus rekening ${label}?`)) return;
     setStatus("saving");
     try {
-      const { data } = await axios.delete(`${API}/settings/bank-accounts/${id}?outlet_id=${encodeURIComponent(outletId)}`);
-      setBanks(data.accounts || []);
-      persistLocal(data.accounts || [], qrisImg);
-      broadcast("payment-settings-updated", { outlet_id: outletId, accounts: data.accounts });
+      const { data } = await axios.delete(`${API}/settings/bank-accounts/${id}?outlet_id=${encodeURIComponent(oid)}`);
+      if (oid === selectedOutletId) setBanks(data.accounts || []);
+      persistLocal(data.accounts || [], qrisImg, oid);
+      broadcast("payment-settings-updated", { outlet_id: oid, accounts: data.accounts, qris: qrisImg });
       setStatus("saved");
       notify(`Rekening ${label} dihapus`);
     } catch (e) { setStatus("error"); notify(`❌ ${e.response?.data?.detail || "Gagal menghapus"}`); }
@@ -2643,48 +2680,65 @@ function PaymentSettings({ notify, outlets = [], session }) {
 
   const handleQris = (e) => runQris(async () => {
     const f = e.target.files?.[0]; if (!f) return;
-    if (!outletId) return notify("Pilih outlet dulu");
+    const oid = selectedOutletId; // capture NOW
+    if (!oid) return notify("Pilih outlet dulu");
     const r = new FileReader();
     await new Promise((res, rej) => { r.onload = res; r.onerror = rej; r.readAsDataURL(f); });
     const dataUrl = r.result;
-    setQrisImg(dataUrl);
+    if (oid === selectedOutletId) setQrisImg(dataUrl);
     setStatus("saving");
     try {
-      await axios.post(`${API}/settings`, { key: `qris-image:${outletId}`, value: { image: dataUrl } });
-      persistLocal(banks, dataUrl);
-      broadcast("payment-settings-updated", { outlet_id: outletId, qris: dataUrl });
+      await axios.post(`${API}/settings`, { key: `qris-image:${oid}`, value: { image: dataUrl } });
+      persistLocal(banks, dataUrl, oid);
+      broadcast("payment-settings-updated", { outlet_id: oid, accounts: banks, qris: dataUrl });
       setStatus("saved");
-      notify(`✅ QRIS untuk ${outletName} diperbarui`);
+      const oname = (availableOutlets.find((o) => o.id === oid) || (outlets || []).find((o) => o.id === oid))?.name || oid;
+      notify(`✅ QRIS untuk ${oname} diperbarui`);
     } catch (err) { setStatus("error"); notify("❌ Gagal upload QRIS"); }
+    finally { setFileInputKey((k) => k + 1); }
   });
 
   const StatusPill = () => {
-    if (status === "saving") return <span className="save-pill saving" data-testid="payment-status"><RefreshCw size={12} className="spin"/> Memproses…</span>;
+    if (status === "loading" || status === "saving") return <span className="save-pill saving" data-testid="payment-status"><RefreshCw size={12} className="spin"/> Memproses…</span>;
     if (status === "saved") return <span className="save-pill saved" data-testid="payment-status"><Check size={12}/> Tersimpan otomatis</span>;
     if (status === "offline") return <span className="save-pill warn" data-testid="payment-status">📴 Mode offline (dari cache)</span>;
     if (status === "error") return <span className="save-pill err" data-testid="payment-status"><X size={12}/> Gagal simpan</span>;
     return null;
   };
 
-  return <section className="panel product-form-v2" data-testid="payment-settings-panel">
+  const canWrite = Boolean(selectedOutletId) && availableOutlets.some((o) => o.id === selectedOutletId);
+
+  return <section className="panel product-form-v2" data-testid="payment-settings-panel" data-active-outlet={selectedOutletId}>
     <div className="form-heading"><div className="form-icon"><CreditCard size={18} /></div>
-      <div><h2>Pengaturan Pembayaran Toko</h2><span>Rekening Bank & QRIS Per Outlet — otomatis muncul di POS Kasir modal pembayaran</span></div>
+      <div><h2>Pengaturan Pembayaran Toko</h2><span>Rekening Bank &amp; QRIS Per Outlet — otomatis muncul di POS Kasir modal pembayaran</span></div>
     </div>
-    <div className="ft-tabs" style={{ marginBottom: 12, alignItems: "center" }}>
+    <div className="ft-tabs" style={{ marginBottom: 12, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
       <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700 }}>
-        <Building2 size={14}/> Outlet:
-        <select value={outletId} onChange={(e) => setOutletId(e.target.value)} disabled={session?.role !== "Super Admin" && availableOutlets.length <= 1} data-testid="payment-outlet-select">
+        <Building2 size={14}/> Outlet Aktif:
+        <select
+          value={selectedOutletId}
+          onChange={(e) => switchOutlet(e.target.value)}
+          disabled={session?.role !== "Super Admin" && availableOutlets.length <= 1}
+          data-testid="payment-outlet-select"
+        >
+          {availableOutlets.length === 0 && <option value="">— Tidak ada outlet aktif —</option>}
           {availableOutlets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
         </select>
       </label>
+      <span data-testid="payment-active-outlet-badge" style={{ fontSize: 11, fontWeight: 700, background: "#fff7ed", color: "#9a3412", padding: "3px 10px", borderRadius: 999, border: "1px solid #fed7aa" }}>
+        📍 {activeOutletName}
+      </span>
       <StatusPill/>
     </div>
+    {!canWrite && <div className="empty-hint" data-testid="payment-no-outlet-warning" style={{ background: "#fef3c7", color: "#92400e" }}>
+      ⚠️ Pilih outlet aktif dulu sebelum menambahkan rekening / QRIS.
+    </div>}
     <div className="form-fields" style={{ gridTemplateColumns: "1.2fr 1.4fr 1.4fr auto" }}>
       <label><span>Nama Bank</span><input value={form.bank_name} onChange={(e) => setForm({ ...form, bank_name: e.target.value })} placeholder="Contoh: BCA" data-testid="bank-name-input" /></label>
       <label><span>Nomor Rekening</span><input value={form.account_number} onChange={(e) => setForm({ ...form, account_number: e.target.value })} placeholder="4820011..." data-testid="bank-account-input" /></label>
       <label><span>Atas Nama</span><input value={form.holder_name} onChange={(e) => setForm({ ...form, holder_name: e.target.value })} placeholder="Nama Pemilik" data-testid="bank-holder-input" /></label>
-      <button className="primary-btn" onClick={add} disabled={busyAdd || !outletId} data-testid="add-bank-button">
-        {busyAdd ? <><RefreshCw size={14} className="spin"/> Menyimpan…</> : <><Plus size={14}/> Tambah</>}
+      <button className="primary-btn" onClick={add} disabled={busyAdd || !canWrite} data-testid="add-bank-button">
+        {busyAdd ? <><RefreshCw size={14} className="spin"/> Menyimpan…</> : <><Plus size={14}/> Tambah ke {activeOutletName}</>}
       </button>
     </div>
     <div className="data-table" style={{ marginTop: 12 }}>
@@ -2693,19 +2747,21 @@ function PaymentSettings({ notify, outlets = [], session }) {
         <span><b>{b.bank_name}</b></span><span className="mono">{b.account_number}</span><span>{b.holder_name}</span>
         <button className="small-action" onClick={() => remove(b.id, `${b.bank_name} - ${b.account_number}`)} data-testid={`delete-bank-${b.id}`}><Trash2 size={12}/></button>
       </div>)}
-      {banks.length === 0 && <div className="empty-vendor" style={{ padding: "20px 0" }}><CreditCard size={20} /><b>Belum ada rekening untuk {outletName}</b><span>Tambahkan minimal 1 rekening supaya Transfer Bank aktif di POS Kasir</span></div>}
+      {banks.length === 0 && <div className="empty-vendor" style={{ padding: "20px 0" }} data-testid="banks-empty-hint">
+        <CreditCard size={20} /><b>Belum ada rekening untuk {activeOutletName}</b><span>Tambahkan minimal 1 rekening supaya Transfer Bank aktif di POS Kasir outlet ini</span>
+      </div>}
     </div>
     <div className="brand-row" style={{ marginTop: 16 }}>
       <div className="brand-preview" data-testid="qris-preview">
-        {qrisImg ? <img src={qrisImg} alt={`QRIS ${outletName}`} /> : <QrCode size={44} color="#f97316" />}
+        {qrisImg ? <img src={qrisImg} alt={`QRIS ${activeOutletName}`} /> : <QrCode size={44} color="#f97316" />}
       </div>
       <div>
-        <label className="upload-btn" data-testid="upload-qris-label" style={{ opacity: busyQris ? 0.5 : 1, pointerEvents: busyQris ? "none" : "auto" }}>
-          {busyQris ? <><RefreshCw size={14} className="spin"/> Mengunggah…</> : <><Upload size={14} /> Upload QRIS untuk {outletName}</>}
-          <input type="file" accept="image/*" onChange={handleQris} disabled={busyQris} style={{ display: "none" }} data-testid="qris-image-input" />
+        <label className="upload-btn" data-testid="upload-qris-label" style={{ opacity: (busyQris || !canWrite) ? 0.5 : 1, pointerEvents: (busyQris || !canWrite) ? "none" : "auto" }}>
+          {busyQris ? <><RefreshCw size={14} className="spin"/> Mengunggah…</> : <><Upload size={14} /> Upload QRIS untuk {activeOutletName}</>}
+          <input key={fileInputKey} type="file" accept="image/*" onChange={handleQris} disabled={busyQris || !canWrite} style={{ display: "none" }} data-testid="qris-image-input" />
         </label>
-        <div className="empty-hint" style={{ marginTop: 8, background: "#fff7ed", color: "#9a3412" }}>
-          📌 QRIS & rekening bank ini otomatis muncul di modal pembayaran POS Kasir outlet <b>{outletName}</b>. Cache LocalStorage aktif → tetap tersedia saat offline.
+        <div className="empty-hint" style={{ marginTop: 8, background: "#fff7ed", color: "#9a3412" }} data-testid="payment-outlet-hint">
+          📌 QRIS &amp; rekening bank ini otomatis muncul di modal pembayaran POS Kasir outlet <b>{activeOutletName}</b> (id: <code>{selectedOutletId || "—"}</code>). Cache LocalStorage aktif → tetap tersedia saat offline.
         </div>
       </div>
     </div>
