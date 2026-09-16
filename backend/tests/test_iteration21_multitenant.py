@@ -378,7 +378,10 @@ class TestRegression:
         prods = [p for p in rprods.json() if (p.get("outlet_id") in (None, "", outlet_id))]
         if not prods:
             pytest.skip("No products in kasir scope")
-        pid = prods[0]["id"]
+        p0 = prods[0]
+        pid = p0["id"]
+        pname = p0.get("name", "TestProd")
+        pprice = float(p0.get("price", 10000))
         # Ensure open shift
         s.post(f"{API}/shifts/close", json={"closing_cash": 0, "note": ""}, headers=CSRF)
         ropen = s.post(f"{API}/shifts/open", json={"opening_cash": 100000, "note": "reg-test"}, headers=CSRF)
@@ -386,9 +389,11 @@ class TestRegression:
         # Create sale
         rsale = s.post(f"{API}/sales", json={
             "table": "T1",
-            "lines": [{"product_id": pid, "quantity": 1}],
+            "lines": [{"product_id": pid, "name": pname, "quantity": 1, "price": pprice}],
+            "subtotal": pprice,
+            "total": pprice,
             "payment_method": "Cash",
-            "cash_received": 100000,
+            "cash_received": max(100000, pprice),
         }, headers=CSRF)
         assert rsale.status_code == 200, rsale.text
         sale = rsale.json()

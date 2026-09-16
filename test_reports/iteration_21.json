@@ -1,0 +1,32 @@
+{
+  "summary": "Re-tested multi-outlet isolation focusing on Product global (outlet_id=NULL) fixes after models.py nullable=True + ALTER TABLE DROP NOT NULL migration. All 6 previously failing Product-global cases now pass, plus full regression on user/outlet/shift/login/sales flows. 19/19 tests pass.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration21_multitenant.py",
+    "/app/test_reports/pytest/iter21_rerun.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is >2600 lines — recommend splitting into routers (products, sales, outlets, admin/users, shifts). File-size guideline breach.",
+    "Product create endpoint: Admin passing outlet_id=None correctly returns 400 (spec-compliant). Consider also validating outlet_id='' from Admin as 400 for consistency (currently untested for Admin).",
+    "Global product visibility via anonymous GET /api/products?outlet_id=X correctly UNIONs outlet-scoped + NULL-scoped products. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration21_multitenant.py (fixed sales payload to include required fields: line.name, line.price, subtotal, total)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "N/A"},
+  "test_credentials": "superadmin/.Superadmin1_ ; admin/MjdKupi#2026 ; kasir/MjdKupi#2026 (seed kasir, outlet-sudirman). Note: request mentioned kasir-aceh/AcehTest123 but seed only has 'kasir' user; tests use seed kasir + create ephemeral TEST_ kasirs for Banda Aceh.",
+  "seed_data_creation": "Tests create ephemeral TEST_-prefixed outlets and kasir users per class; each test uses uuid suffix so no cross-run collision. Global products created with TEST_GLOBAL_ prefix remain in DB (persist by design for outlet visibility checks).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iteration_21 covers multi-outlet isolation + global product visibility. All Product-global endpoints now behave correctly: SA can create with outlet_id=None/''/all → stored as NULL; Admin blocked (400); global products visible in every outlet's list (auth + anonymous). Regressions on shift open, login cascade, outlet soft-delete, sales+stock-movement, dashboard, settlement all pass. Ephemeral TEST_ kasirs need existing outlet-banda-aceh + outlet-sudirman which the module fixture auto-creates/reactivates.",
+  "rca of the issue": "Previous iteration_20: Product.outlet_id had NOT NULL constraint + DEFAULT 'outlet-sudirman' at DB level, so passing NULL was silently coerced or rejected. Fix applied: (1) models.py Column(String(36), nullable=True) with no default; (2) startup migration ALTER TABLE mjd_products ALTER COLUMN outlet_id DROP NOT NULL + DROP DEFAULT; (3) create_product rewrote to route outlet_id in (None, '', 'all') through Super-Admin-only global branch, else falls back to admin's outlet with 400 if Admin explicitly requests global. Verified via POST returning outlet_id=null and GET /api/products?outlet_id=X including the NULL-outlet row."
+}
