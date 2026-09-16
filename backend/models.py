@@ -119,6 +119,7 @@ class Expense(Base):
 class Sale(Base):
     __tablename__ = "mjd_sales"
     id = Column(String(36), primary_key=True, default=gen_uuid)
+    idempotency_key = Column(String(64), index=True, nullable=True)
     table_no = Column(String(32), default="Meja 01")
     subtotal = Column(Float, default=0.0)
     tax = Column(Float, default=0.0)

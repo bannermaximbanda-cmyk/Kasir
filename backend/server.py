@@ -115,6 +115,7 @@ class SaleLine(BaseModel):
 
 class SaleInput(BaseModel):
     id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     table: str = "Meja 01"
     lines: List[SaleLine]
     subtotal: float
@@ -922,9 +923,29 @@ async def create_kitchen_tickets(
 @api_router.post("/sales")
 async def create_sale(
     payload: SaleInput,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(current_user),
 ):
+    # ── Idempotency guard ────────────────────────────────────────────────
+    # Client generates a UUID once per checkout attempt. Retry with same key
+    # within 15 minutes returns the ORIGINAL sale instead of creating a duplicate.
+    idem_key = (payload.idempotency_key or request.headers.get("Idempotency-Key") or "").strip()[:64]
+    if idem_key:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+        prev = await db.execute(
+            select(M.Sale).where(
+                M.Sale.idempotency_key == idem_key,
+                M.Sale.cashier_id == user.id,
+                M.Sale.created_at >= cutoff,
+            ).order_by(M.Sale.created_at.desc()).limit(1)
+        )
+        existing = prev.scalar_one_or_none()
+        if existing:
+            resp = to_dict(existing)
+            resp["_idempotent_replay"] = True
+            return resp
+
     # Enforce open shift for kasir
     shift_id = None
     if user.role == "Kasir":
@@ -977,6 +998,7 @@ async def create_sale(
 
     sale = M.Sale(
         id=payload.id or str(uuid.uuid4()),
+        idempotency_key=idem_key or None,
         table_no=payload.table,
         subtotal=subtotal,
         tax=tax,
@@ -2506,6 +2528,8 @@ async def bootstrap():
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS features_enabled JSONB DEFAULT '{}'::jsonb",
             "CREATE INDEX IF NOT EXISTS ix_sales_outlet ON mjd_sales(outlet_id)",
+            "ALTER TABLE mjd_sales ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_sales_idempotency ON mjd_sales(idempotency_key)",
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(32) DEFAULT ''",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_scheme VARCHAR(16) DEFAULT 'percent'",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_fixed FLOAT DEFAULT 0",
