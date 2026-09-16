@@ -2218,8 +2218,9 @@ async def get_bank_accounts(
     outlet_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    outlet = outlet_id or "outlet-sudirman"
-    r = await db.execute(select(M.Setting).where(M.Setting.key == f"bank-accounts:{outlet}"))
+    if not outlet_id:
+        return {"accounts": []}
+    r = await db.execute(select(M.Setting).where(M.Setting.key == f"bank-accounts:{outlet_id}"))
     row = r.scalar_one_or_none()
     return row.value if row else {"accounts": []}
 
@@ -2233,7 +2234,11 @@ async def add_bank_account(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
-    outlet = outlet_id or user.outlet_id or "outlet-sudirman"
+    outlet = outlet_id or user.outlet_id
+    if not outlet:
+        raise HTTPException(status_code=400, detail="outlet_id wajib")
+    if user.role == "Admin" and outlet != user.outlet_id:
+        raise HTTPException(status_code=403, detail="Admin hanya bisa atur rekening outletnya sendiri")
     key = f"bank-accounts:{outlet}"
     r = await db.execute(select(M.Setting).where(M.Setting.key == key))
     row = r.scalar_one_or_none()
@@ -2246,7 +2251,7 @@ async def add_bank_account(
     else:
         db.add(M.Setting(key=key, value={"accounts": accounts}))
     await db.commit()
-    return {"accounts": accounts}
+    return {"accounts": accounts, "outlet_id": outlet}
 
 
 @api_router.delete("/settings/bank-accounts/{account_id}")
@@ -2256,7 +2261,11 @@ async def delete_bank_account(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
-    outlet = outlet_id or user.outlet_id or "outlet-sudirman"
+    outlet = outlet_id or user.outlet_id
+    if not outlet:
+        raise HTTPException(status_code=400, detail="outlet_id wajib")
+    if user.role == "Admin" and outlet != user.outlet_id:
+        raise HTTPException(status_code=403, detail="Admin hanya bisa atur rekening outletnya sendiri")
     key = f"bank-accounts:{outlet}"
     r = await db.execute(select(M.Setting).where(M.Setting.key == key))
     row = r.scalar_one_or_none()
@@ -2267,7 +2276,7 @@ async def delete_bank_account(
     row.updated_at = datetime.now(timezone.utc)
     flag_modified(row, "value")
     await db.commit()
-    return {"accounts": accounts}
+    return {"accounts": accounts, "outlet_id": outlet}
 
 
 # -----------------------------------------------------------------------------

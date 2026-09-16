@@ -255,6 +255,16 @@ Aplikasi web POS & ERP Retail multi-tenant "MJD Kupi" dengan tema Clean White & 
 ## Test credentials
 See `/app/memory/test_credentials.md`.
 
+## Iteration 26 (Feb 2026 — Dynamic POS Checkout Modal per Outlet)
+- [x] **POS `PaymentModal` outlet-aware**: menerima prop `outletId` + `outletName` dari App state (kasir → `session.outlet_id`; Admin/Super Admin → `activeOutlet` fallback ke session).
+- [x] **Dynamic bank accounts**: fetch dari `/api/settings/bank-accounts?outlet_id={outletId}`; dropdown "Pilih rekening tujuan" menampilkan semua rekening outlet + kartu detail (bank, no. rekening, atas nama) dengan tombol **Salin**. Empty-state hint yang jelas jika belum ada rekening.
+- [x] **Dynamic QRIS image**: fetch dari `/api/settings/qris-image:{outletId}`; jika ada → tampilkan gambar; fallback ke `QRCodeSVG` dinamis (`MJDKUPI|OUTLET:{id}|AMOUNT|TS`).
+- [x] **Real-time sync via BroadcastChannel**: `PaymentModal` mendengarkan `payment-settings-updated` — perubahan bank/QRIS di `PaymentSettings` langsung tercermin di modal kasir tanpa reload.
+- [x] **Offline fallback**: LocalStorage cache `app_payment_settings_{outletId}` diprioritaskan untuk render instan + badge "📴 Data pembayaran outlet dari cache offline" saat network fail.
+- [x] **Reference format**: Transfer method sekarang menyimpan reference sebagai `{bank}-{account} · {ref}` sehingga struk & rekonsiliasi lebih informatif.
+- [x] **Bug fix (compile blocker)**: `SettingsPage` menghapus prop `outlets` duplikat yang bentrok dengan state internal (`const [outlets, setOutlets] = useState([])`), memperbaiki ESLint parsing error yang muncul saat iter25.
+- [x] **Verified via screenshot**: Cash tab tampil dengan outlet name di header; Transfer tanpa bank menampilkan warning; Transfer dengan 2 bank (BCA & Mandiri) switch dropdown → kartu update instan; QRIS fallback QR muncul + upload proof.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).
