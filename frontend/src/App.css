@@ -916,3 +916,11 @@ button:disabled { cursor: not-allowed; opacity: 0.7; }
   padding: 4px 8px; border-radius: 4px; z-index: 2;
 }
 .panel-disabled button:not(.modal-close) { pointer-events: none; }
+
+.pdf-progress {
+  background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px;
+  padding: 14px 18px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px;
+}
+.pdf-progress-bar { height: 8px; background: #ffedd5; border-radius: 4px; overflow: hidden; }
+.pdf-progress-bar > div { height: 100%; background: linear-gradient(90deg, #f97316, #ea580c); transition: width .2s ease-out; }
+.pdf-progress span { font-size: 12px; color: #9a3412; font-weight: 600; }

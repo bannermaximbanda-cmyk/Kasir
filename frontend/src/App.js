@@ -1714,34 +1714,144 @@ function Reports({ products, expenses }) {
 
 // -------- Tables (QR) --------
 function Tables({ notify, activeOutlet, branding }) {
-  const [count, setCount] = useState(12);
+  const [count, setCount] = useState(() => {
+    try { return Math.max(1, Math.min(500, Number(localStorage.getItem("mjd_qr_count")) || 12)); } catch { return 12; }
+  });
   const [baseUrl, setBaseUrl] = useState(() => {
     try { return localStorage.getItem("mjd_qr_base_url") || ORIGIN; } catch { return ORIGIN; }
   });
   const [storeId, setStoreId] = useState(() => {
     try { return localStorage.getItem("mjd_qr_store_id") || (branding?.slug || ""); } catch { return ""; }
   });
+  const [pdfProgress, setPdfProgress] = useState(null); // { done, total } | null
+  const qrRefs = useRef({}); // { [tableNo]: SVG element }
   useEffect(() => { try { localStorage.setItem("mjd_qr_base_url", baseUrl); } catch {} }, [baseUrl]);
   useEffect(() => { try { localStorage.setItem("mjd_qr_store_id", storeId); } catch {} }, [storeId]);
-  const meja = Array.from({ length: count }, (_, i) => String(i + 1).padStart(2, "0"));
+  useEffect(() => { try { localStorage.setItem("mjd_qr_count", String(count)); } catch {} }, [count]);
+  const meja = useMemo(() => Array.from({ length: count }, (_, i) => String(i + 1).padStart(String(count).length >= 3 ? 3 : 2, "0")), [count]);
   const outletId = activeOutlet && activeOutlet !== "all" ? activeOutlet : "outlet-sudirman";
   const linkFor = (t) => {
     const parts = [`table=${t}`, `outlet_id=${outletId}`];
     if (storeId) parts.unshift(`store_id=${storeId}`);
     return `${baseUrl}/self-order?${parts.join("&")}`;
   };
-  const printAll = () => { document.body.classList.add("print-all-mode"); setTimeout(() => { window.print(); document.body.classList.remove("print-all-mode"); }, 300); };
+
+  // Render a single QR card SVG → canvas dataURL (PNG). Returns { dataUrl, w, h }.
+  const renderQRCanvas = async (tableNo, size = 512) => {
+    const svg = qrRefs.current[tableNo];
+    if (!svg) return null;
+    // Compose a printable card: brand + QR + label
+    const cardW = size + 80;
+    const cardH = size + 220;
+    const canvas = document.createElement("canvas");
+    canvas.width = cardW; canvas.height = cardH;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, cardW, cardH);
+    // Brand text
+    ctx.fillStyle = "#18212b"; ctx.textAlign = "center";
+    ctx.font = "bold 34px 'Space Grotesk', sans-serif";
+    ctx.fillText(branding?.name || "MJD Kupi", cardW / 2, 60);
+    // QR: convert SVG → img → draw
+    const xml = new XMLSerializer().serializeToString(svg);
+    const svg64 = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
+    await new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => { ctx.drawImage(img, 40, 90, size, size); res(); };
+      img.onerror = rej;
+      img.src = svg64;
+    });
+    // Table label
+    ctx.fillStyle = "#f97316"; ctx.font = "bold 48px 'Space Grotesk', sans-serif";
+    ctx.fillText(`MEJA ${tableNo}`, cardW / 2, size + 155);
+    ctx.fillStyle = "#6b7280"; ctx.font = "18px sans-serif";
+    ctx.fillText("Scan QR untuk Pesan", cardW / 2, size + 190);
+    return { dataUrl: canvas.toDataURL("image/png"), w: cardW, h: cardH };
+  };
+
+  const downloadPNG = async (tableNo) => {
+    try {
+      const r = await renderQRCanvas(tableNo, 512);
+      if (!r) return notify("QR belum siap");
+      const a = document.createElement("a");
+      a.href = r.dataUrl; a.download = `qr-meja-${tableNo}.png`; a.click();
+      notify(`QR Meja ${tableNo} diunduh (PNG)`);
+    } catch (e) { notify("Gagal unduh QR"); }
+  };
+
+  const downloadSinglePDF = async (tableNo) => {
+    try {
+      const { jsPDF } = await import("jspdf");
+      const r = await renderQRCanvas(tableNo, 512);
+      if (!r) return notify("QR belum siap");
+      const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+      const pageW = 210, pageH = 297;
+      const imgW = 120, imgH = (r.h / r.w) * imgW;
+      pdf.addImage(r.dataUrl, "PNG", (pageW - imgW) / 2, (pageH - imgH) / 2, imgW, imgH, undefined, "FAST");
+      pdf.save(`qr-meja-${tableNo}.pdf`);
+      notify(`QR Meja ${tableNo} diunduh (PDF)`);
+    } catch (e) { notify("Gagal unduh PDF"); }
+  };
+
+  // Batch print ALL as PDF (2 per page landscape or 4 per page portrait)
+  const printAllPDF = async () => {
+    try {
+      setPdfProgress({ done: 0, total: meja.length });
+      const { jsPDF } = await import("jspdf");
+      const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+      const pageW = 210, pageH = 297;
+      const perPage = 4; // 2x2 grid
+      const cols = 2, rows = 2;
+      const cellW = pageW / cols, cellH = pageH / rows;
+      const marginX = 8, marginY = 8;
+      for (let i = 0; i < meja.length; i++) {
+        const tableNo = meja[i];
+        const posInPage = i % perPage;
+        if (i > 0 && posInPage === 0) pdf.addPage();
+        const col = posInPage % cols, row = Math.floor(posInPage / cols);
+        const r = await renderQRCanvas(tableNo, 384);
+        if (r) {
+          const availW = cellW - marginX * 2;
+          const availH = cellH - marginY * 2;
+          const ratio = Math.min(availW / r.w, availH / r.h) * 2.83; // dataUrl in px → mm rough
+          const drawW = Math.min(availW, r.w * ratio / 2.83);
+          const drawH = (r.h / r.w) * drawW;
+          const x = col * cellW + (cellW - drawW) / 2;
+          const y = row * cellH + (cellH - drawH) / 2;
+          pdf.addImage(r.dataUrl, "PNG", x, y, drawW, drawH, undefined, "FAST");
+        }
+        setPdfProgress({ done: i + 1, total: meja.length });
+        // Yield to browser every 5 cards → prevent mobile browser crash
+        if (i % 5 === 4) await new Promise((res) => setTimeout(res, 30));
+      }
+      pdf.save(`qr-meja-${meja.length}-${outletId}-${Date.now()}.pdf`);
+      setPdfProgress(null);
+      notify(`✅ PDF berisi ${meja.length} QR meja berhasil diunduh`);
+    } catch (e) {
+      setPdfProgress(null);
+      notify(`Gagal cetak PDF: ${e.message || e}`);
+    }
+  };
+
+  const commitCount = (val) => {
+    const v = Math.max(1, Math.min(500, Number(val) || 1));
+    setCount(v);
+  };
+
   return <>
-    <SectionHeader eyebrow="SELF-ORDER STUDIO" title="QR meja pelanggan" description="Generate QR unik per meja dengan Base URL & Store ID kustom. Auto-render, siap cetak PDF."
+    <SectionHeader eyebrow="SELF-ORDER STUDIO" title="QR meja pelanggan" description="Generate QR unik per meja (1-500). Download individual PNG/PDF atau cetak semua sekaligus."
       action={<div className="row-gap">
-        <label className="mini-num">Jumlah meja<input type="number" value={count} min={1} max={100} onChange={(e) => setCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} onFocus={numOnFocus} data-testid="tables-count-input" /></label>
-        <button className="outline-btn" onClick={printAll} data-testid="print-all-qr-button"><Printer size={14}/> Cetak Semua QR (PDF)</button>
-        <button className="primary-btn" data-testid="generate-qr-button" onClick={() => notify(`QR ${count} meja siap cetak`)}><Plus size={16} /> Generate</button>
+        <label className="mini-num">Jumlah meja<input type="number" value={count} min={1} max={500} onChange={(e) => commitCount(e.target.value)} onFocus={numOnFocus} data-testid="tables-count-input" /></label>
+        <button className="outline-btn" onClick={printAllPDF} disabled={!!pdfProgress} data-testid="print-all-qr-button"><Printer size={14}/> {pdfProgress ? `Membuat PDF... ${pdfProgress.done}/${pdfProgress.total}` : "Cetak Semua QR (PDF)"}</button>
+        <button className="primary-btn" data-testid="generate-qr-button" onClick={() => notify(`${count} QR meja siap cetak`)}><Plus size={16} /> Generate</button>
       </div>} />
+    {pdfProgress && <div className="pdf-progress" data-testid="pdf-progress-bar">
+      <div className="pdf-progress-bar"><div style={{ width: `${(pdfProgress.done / pdfProgress.total) * 100}%` }}/></div>
+      <span>Merender QR {pdfProgress.done} dari {pdfProgress.total}… Jangan tutup halaman.</span>
+    </div>}
     {/* Configuration form */}
     <div className="qr-config panel" data-testid="qr-config">
       <div className="form-heading"><div className="form-icon"><LinkIcon size={18}/></div>
-        <div><h2>Konfigurasi URL QR</h2><span>Base URL dinamis — perubahan otomatis render ulang semua QR di bawah.</span></div>
+        <div><h2>Konfigurasi URL QR</h2><span>Base URL dinamis — perubahan otomatis render ulang semua QR di bawah. Tersimpan otomatis di browser.</span></div>
       </div>
       <div className="qr-config-grid">
         <label>Domain / Base URL Order
@@ -1754,7 +1864,7 @@ function Tables({ notify, activeOutlet, branding }) {
           <input value={outletId} disabled/>
         </label>
       </div>
-      <div className="qr-preview-url"><b>Preview URL:</b> <span className="mono">{linkFor("05")}</span></div>
+      <div className="qr-preview-url"><b>Preview URL:</b> <span className="mono">{linkFor(meja[0] || "01")}</span></div>
     </div>
     <div className="table-grid-v2 qr-cards-print">
       {meja.map((t) => <div className="table-card-v2 qr-print-card" key={t} data-testid={`table-card-${t}`}>
@@ -1762,12 +1872,13 @@ function Tables({ notify, activeOutlet, branding }) {
           {branding?.logo_url ? <img src={branding.logo_url} alt="" className="qr-brand-logo"/> : <Coffee size={22}/>}
           <b>{branding?.name || "MJD Kupi"}</b>
         </div>
-        <div className="table-qr-real"><QRCodeSVG value={linkFor(t)} size={140} level="H" includeMargin={true} /></div>
+        <div className="table-qr-real"><QRCodeSVG ref={(el) => { if (el) qrRefs.current[t] = el; }} value={linkFor(t)} size={140} level="H" includeMargin={true} /></div>
         <strong className="qr-table-no">MEJA {t}</strong>
         <span className="qr-cta">Scan QR untuk Pilih Menu & Pesan</span>
         <div className="table-card-actions no-print">
           <button className="small-action" onClick={() => { navigator.clipboard?.writeText(linkFor(t)); notify(`Link Meja ${t} disalin`); }} data-testid={`copy-table-${t}`}><Copy size={12} /> Salin</button>
-          <button className="small-action" data-testid={`print-table-${t}`} onClick={() => { document.body.classList.add("print-single-mode"); document.body.setAttribute("data-print-table", t); setTimeout(() => { window.print(); document.body.classList.remove("print-single-mode"); document.body.removeAttribute("data-print-table"); }, 300); }}><Printer size={12} /> Cetak</button>
+          <button className="small-action" onClick={() => downloadPNG(t)} data-testid={`download-png-${t}`}><Download size={12} /> PNG</button>
+          <button className="small-action" onClick={() => downloadSinglePDF(t)} data-testid={`download-pdf-${t}`}><FileText size={12} /> PDF</button>
         </div>
       </div>)}
     </div>
