@@ -141,7 +141,9 @@ function AdminApp() {
     if (session.role === "Super Admin" || session.role === "Admin") setActiveOutlet("all");
     else setActiveOutlet(session.outlet_id || "outlet-sudirman");
     reloadProducts(); reloadMerchants(); reloadExpenses();
-    axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {});
+    // Super Admin includes inactive outlets so they can reactivate; others only get active
+    const outletUrl = session?.role === "Super Admin" ? `${API}/outlets?include_inactive=1` : `${API}/outlets`;
+    axios.get(outletUrl).then(({ data }) => setOutlets(data)).catch(() => {});
     axios.get(`${API}/settings/logo`).then(({ data }) => setBrandLogo(data?.logo_data || "")).catch(() => {});
     axios.get(`${API}/branding/current`).then(({ data }) => {
       setBranding(data);
@@ -360,7 +362,7 @@ function AdminApp() {
           {page === "kds" && <KDS notify={notify} merchants={merchants} />}
           {page === "inventory" && <Inventory products={products} reload={reloadProducts} notify={notify} />}
           {page === "expenses" && <Expenses expenses={expenses} reload={reloadExpenses} notify={notify} session={session} shift={shift} />}
-          {page === "products" && <Products products={products} merchants={merchants} reload={reloadProducts} notify={notify} />}
+          {page === "products" && <Products products={products} merchants={merchants} outlets={outlets} session={session} reload={reloadProducts} notify={notify} />}
           {page === "merchants" && <Merchants merchants={merchants} reload={reloadMerchants} notify={notify} />}
           {page === "cashiers" && <CashierMonitor notify={notify} onView={setShiftReport} pinDisabled={!isFeatureAllowed("cashier_pin")} />}
           {page === "users" && session.role === "Super Admin" && <UserManagement notify={notify} />}
@@ -1155,8 +1157,8 @@ function ExpenseModal({ onClose, onSaved, session, shift }) {
 }
 
 // -------- Products --------
-function Products({ products, merchants, reload, notify }) {
-  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: "", cost: "", stock: "", sku: "", is_active: true, color: "#ffedd5", image_url: "", variants: [] });
+function Products({ products, merchants, outlets = [], session, reload, notify }) {
+  const [form, setForm] = useState({ name: "", category: "Kopi", merchant_id: merchants[0]?.id || "", price: "", cost: "", stock: "", sku: "", is_active: true, is_global: false, outlet_id: session?.outlet_id || "", color: "#ffedd5", image_url: "", variants: [] });
   const [editProduct, setEditProduct] = useState(null);
   const [showImport, setShowImport] = useState(false);
   const [search, setSearch] = useState("");
@@ -1168,9 +1170,14 @@ function Products({ products, merchants, reload, notify }) {
   const save = async () => {
     if (!form.name) return notify("Nama produk wajib diisi");
     const vendor = merchants.find((m) => m.id === form.merchant_id)?.name || "MJD Kupi";
-    await axios.post(`${API}/products`, { ...form, vendor, price: Number(form.price) || 0, cost: Number(form.cost) || 0, stock: Number(form.stock) || 0, variants: form.variants || [] });
-    setForm({ ...form, name: "", price: "", cost: "", stock: "", sku: "", image_url: "", variants: [] });
-    reload(); notify("Produk berhasil ditambahkan");
+    const outlet_id = form.is_global ? null : (form.outlet_id || session?.outlet_id || null);
+    if (!form.is_global && !outlet_id) return notify("Pilih outlet target atau tandai 'Berlaku di semua outlet'");
+    try {
+      await axios.post(`${API}/products`, { ...form, outlet_id, vendor, price: Number(form.price) || 0, cost: Number(form.cost) || 0, stock: Number(form.stock) || 0, variants: form.variants || [] });
+      setForm({ ...form, name: "", price: "", cost: "", stock: "", sku: "", image_url: "", variants: [] });
+      reload();
+      notify(`✅ Produk ${form.name} tersimpan ${form.is_global ? "(Berlaku di semua outlet)" : ""}`);
+    } catch (e) { notify(`❌ ${e.response?.data?.detail || "Gagal simpan produk"}`); }
   };
   const handleImage = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setForm({ ...form, image_url: r.result }); r.readAsDataURL(f); };
   const addFormVariant = () => setForm({ ...form, variants: [...(form.variants || []), { name: "", price: Number(form.price) || 0, cost: Number(form.cost) || 0, active: true }] });
@@ -1273,6 +1280,14 @@ function Products({ products, merchants, reload, notify }) {
           <label className="field-lg"><span>Nama produk</span><input id="new-product" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Contoh: Es Kopi Pandan" data-testid="product-name-input" /></label>
           <label><span>SKU / Barcode</span><input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} placeholder="KP-001" data-testid="product-sku-input" /></label>
           <label><span>Merchant</span><select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+          {session?.role === "Super Admin" && <label className="switch-lg" data-testid="product-global-toggle-wrapper">
+            <input type="checkbox" checked={form.is_global} onChange={(e) => setForm({ ...form, is_global: e.target.checked })} data-testid="product-global-toggle" />
+            <i /><span>{form.is_global ? "🌐 SEMUA OUTLET" : "🏪 SPESIFIK OUTLET"}</span>
+          </label>}
+          {!form.is_global && <label><span>Outlet Target</span><select value={form.outlet_id} onChange={(e) => setForm({ ...form, outlet_id: e.target.value })} data-testid="product-outlet-select" disabled={session?.role !== "Super Admin"}>
+            <option value="">— Pilih Outlet —</option>
+            {outlets.filter((o) => o.active !== false).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+          </select></label>}
           <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
           <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} onFocus={numOnFocus} placeholder="0" data-testid="product-price-input" /></label>
           <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} onFocus={numOnFocus} placeholder="0" data-testid="product-cost-input" /></label>
@@ -2127,7 +2142,7 @@ function SettingsPage({ notify, role, brandingText, onBrandingTextSaved, onFeatu
   const [connected, setConnected] = useState(isPrinterConnected());
   const isSuper = role === "Super Admin";
 
-  const loadOutlets = () => axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {});
+  const loadOutlets = () => axios.get(`${API}/outlets?include_inactive=1`).then(({ data }) => setOutlets(data)).catch(() => {});
   useEffect(() => {
     axios.get(`${API}/settings/printer`).then(({ data }) => { if (data && Object.keys(data).length) setPrinter((p) => ({ ...p, ...data })); }).catch(() => {});
     axios.get(`${API}/settings/logo`).then(({ data }) => setLogo(data?.logo_data || "")).catch(() => {});
@@ -2147,7 +2162,22 @@ function SettingsPage({ notify, role, brandingText, onBrandingTextSaved, onFeatu
       setOutletForm({ name: "", address: "", phone: "" }); loadOutlets(); notify("Outlet ditambahkan");
     } catch (e) { notify(e.response?.data?.detail || "Gagal menambahkan outlet"); }
   };
-  const deleteOutlet = async (id) => { if (!window.confirm("Hapus outlet ini?")) return; try { await axios.delete(`${API}/outlets/${id}`); loadOutlets(); notify("Outlet dihapus"); } catch (e) { notify(e.response?.data?.detail || "Gagal"); } };
+  const deleteOutlet = async (o) => {
+    const active = o.active !== false;
+    const label = active ? "nonaktifkan" : "AKTIFKAN kembali";
+    if (!window.confirm(`Yakin ${label} outlet "${o.name}"?\n\n${active ? "⚠️ Semua user pada outlet ini akan diblokir login. Data historis tetap tersimpan." : "User yang tadinya nonaktif harus di-aktifkan ulang manual dari halaman User & Security."}`)) return;
+    try {
+      if (active) {
+        const { data } = await axios.delete(`${API}/outlets/${o.id}`);
+        loadOutlets();
+        notify(`✅ Outlet "${o.name}" dinonaktifkan (${data.affected_users} user auto-blocked)`);
+      } else {
+        await axios.put(`${API}/outlets/${o.id}`, { name: o.name, address: o.address || "", active: true });
+        loadOutlets();
+        notify(`✅ Outlet "${o.name}" aktif kembali`);
+      }
+    } catch (e) { notify(`❌ ${e.response?.data?.detail || "Gagal"}`); }
+  };
 
   return <>
     <SectionHeader eyebrow="OPERATIONS" title="Pengaturan Sistem" description="Printer thermal, branding, dan multi-outlet." />
@@ -2204,7 +2234,9 @@ function SettingsPage({ notify, role, brandingText, onBrandingTextSaved, onFeatu
             <span>{o.address || "-"}</span>
             <span>{o.phone || "-"}</span>
             <span><i className={`status-dot ${o.active ? "good" : "low"}`} />{o.active ? "Aktif" : "Nonaktif"}</span>
-            <button className="small-action" onClick={() => deleteOutlet(o.id)} data-testid={`delete-outlet-${o.id}`}><Trash2 size={12} /> Hapus</button>
+            <button className={`small-action ${o.active !== false ? "" : "green"}`} onClick={() => deleteOutlet(o)} data-testid={`delete-outlet-${o.id}`}>
+              {o.active !== false ? <><Trash2 size={12} /> Nonaktifkan</> : <><Check size={12} /> Aktifkan</>}
+            </button>
           </div>)}
         </div>
       </section>
@@ -2496,16 +2528,35 @@ function UserManagement({ notify }) {
   const [users, setUsers] = useState([]);
   const [outlets, setOutlets] = useState([]);
   const [reveal, setReveal] = useState({});
-  const [form, setForm] = useState({ email: "", username: "", password: "", role: "Kasir", name: "", outlet_id: "outlet-sudirman", active: true });
+  const [form, setForm] = useState({ email: "", username: "", password: "", role: "Kasir", name: "", outlet_id: "", active: true });
   const [showReset, setShowReset] = useState(null);
   const [newPass, setNewPass] = useState("");
+  const [saving, setSaving] = useState(false);
   const load = () => axios.get(`${API}/admin/users`).then(({ data }) => setUsers(data)).catch(() => {});
-  useEffect(() => { load(); axios.get(`${API}/outlets`).then(({ data }) => setOutlets(data)).catch(() => {}); }, []);
+  useEffect(() => {
+    load();
+    axios.get(`${API}/outlets`).then(({ data }) => {
+      const active = (data || []).filter((o) => o.active !== false);
+      setOutlets(active);
+      // Prefill default outlet as first active outlet — so user can't accidentally save empty
+      setForm((f) => f.outlet_id ? f : { ...f, outlet_id: active[0]?.id || "" });
+    }).catch(() => {});
+  }, []);
   const save = async () => {
-    if (!form.email || !form.password || !form.name) return notify("Email, password, nama wajib");
+    if (!form.email || !form.password || !form.name) return notify("Nama, Email, dan Password wajib diisi");
     if (!form.outlet_id) return notify("Outlet tugas wajib dipilih");
-    try { await axios.post(`${API}/admin/users`, form); setForm({ ...form, email: "", username: "", password: "", name: "" }); load(); notify("User berhasil dibuat"); }
-    catch (e) { notify(e.response?.data?.detail || "Gagal menambah user"); }
+    // Validate outlet exists & active
+    const selected = outlets.find((o) => o.id === form.outlet_id);
+    if (!selected) return notify("Outlet yang dipilih tidak valid / sudah dihapus. Refresh halaman & pilih ulang.");
+    setSaving(true);
+    try {
+      await axios.post(`${API}/admin/users`, form);
+      setForm({ ...form, email: "", username: "", password: "", name: "" });
+      load();
+      notify(`✅ User "${form.name}" tersimpan ke outlet ${selected.name}`);
+    } catch (e) {
+      notify(`❌ ${e.response?.data?.detail || "Gagal menambah user"}`);
+    } finally { setSaving(false); }
   };
   const reset = async () => {
     if (!newPass) return notify("Password baru wajib diisi");
@@ -2525,8 +2576,8 @@ function UserManagement({ notify }) {
         <label><span>Email</span><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} type="email" data-testid="user-email-input" /></label>
         <label><span>Password</span><input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-testid="user-password-input" /></label>
         <label><span>Role</span><select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} data-testid="user-role-select">{["Super Admin", "Admin", "Vendor", "Kasir"].map((r) => <option key={r}>{r}</option>)}</select></label>
-        <label><span>Outlet <em style={{ color: "#ef4444" }}>*</em></span><select value={form.outlet_id} onChange={(e) => setForm({ ...form, outlet_id: e.target.value })} data-testid="user-outlet-select">{outlets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
-        <button className="primary-btn" onClick={save} data-testid="save-user-button"><Plus size={14} /> Simpan</button>
+        <label><span>Outlet <em style={{ color: "#ef4444" }}>*</em></span><select value={form.outlet_id} onChange={(e) => setForm({ ...form, outlet_id: e.target.value })} data-testid="user-outlet-select"><option value="">— Pilih Outlet —</option>{outlets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
+        <button className="primary-btn" onClick={save} disabled={saving} data-testid="save-user-button"><Plus size={14} /> {saving ? "Menyimpan…" : "Simpan"}</button>
       </div>
     </div>
     <section className="panel table-panel">
@@ -2574,12 +2625,19 @@ function ShiftOpenModal({ onClose, onOpened, session, activeOutlet, outlets, not
     return num ? `Rp ${Number(num).toLocaleString("id-ID")}` : "";
   };
   const parseIDR = (v) => Number(String(v).replace(/[^0-9]/g, "")) || 0;
-  const outletName = outlets?.find((o) => o.id === (session?.outlet_id || activeOutlet))?.name || session?.outlet_id || "Outlet Sudirman";
+  // Dynamic outlet resolution (no hardcoded fallback)
+  const userOutletId = session?.outlet_id || null;
+  const outlet = outlets?.find((o) => o.id === userOutletId);
+  const outletMissing = !userOutletId || !outlet;
+  const outletInactive = outlet && outlet.active === false;
+  const blocked = outletMissing || outletInactive;
+  const outletName = outlet?.name || (userOutletId ? `${userOutletId} (tidak dikenal)` : "Belum ditugaskan");
   const now = new Date();
   const dateLabel = now.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const timeLabel = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
   const QUICK = [100000, 200000, 500000, 1000000];
   const submit = async () => {
+    if (blocked) return;
     const opening = parseIDR(cash);
     if (opening <= 0) { notify?.("Kas awal wajib diisi (minimal Rp 1)"); return; }
     setSubmitting(true);
@@ -2588,7 +2646,6 @@ function ShiftOpenModal({ onClose, onOpened, session, activeOutlet, outlets, not
       onOpened(data);
     } catch (e) {
       const detail = e.response?.data?.detail || e.message || "Gagal buka shift. Coba lagi.";
-      // If existing shift is open, try to reuse it
       if (e.response?.status === 400 && /aktif|open/i.test(detail)) {
         try {
           const { data: sh } = await axios.get(`${API}/shifts/current`);
@@ -2622,8 +2679,11 @@ function ShiftOpenModal({ onClose, onOpened, session, activeOutlet, outlets, not
       <label>Catatan (opsional)</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Contoh: shift pagi, uang recehan diambil dulu" data-testid="shift-open-note-input" />
     </div>
-    <button className="primary-btn full" disabled={submitting} onClick={submit} data-testid="shift-open-submit">
-      {submitting ? <><RefreshCw size={14} className="spin"/> Membuka shift…</> : <><PlayCircle size={14}/> Mulai shift · Rp {parseIDR(cash).toLocaleString("id-ID")}</>}
+    {blocked && <div className="warn-banner" data-testid="shift-outlet-warning" style={{ margin: "8px 0" }}>
+      ⚠️ <b>Outlet tidak ditemukan atau telah nonaktif.</b> {outletMissing ? "User belum ditugaskan ke outlet manapun. Hubungi Super Admin untuk assign outlet." : `Outlet "${outletName}" sudah dinonaktifkan. Tidak bisa buka shift baru.`}
+    </div>}
+    <button className="primary-btn full" disabled={submitting || blocked} onClick={submit} data-testid="shift-open-submit">
+      {blocked ? <><Building2 size={14}/> Outlet tidak valid</> : submitting ? <><RefreshCw size={14} className="spin"/> Membuka shift…</> : <><PlayCircle size={14}/> Mulai shift · Rp {parseIDR(cash).toLocaleString("id-ID")}</>}
     </button>
   </div></div>;
 }

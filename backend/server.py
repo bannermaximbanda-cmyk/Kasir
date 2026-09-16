@@ -11,7 +11,7 @@ import jwt
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.cors import CORSMiddleware
 
@@ -311,6 +311,13 @@ async def login(payload: LoginInput, response: Response, db: AsyncSession = Depe
             ok = True
     if not ok:
         raise HTTPException(status_code=401, detail="Email/username atau password salah")
+    # Cascading validation: block login if user is bound to a deleted or inactive outlet (Super Admin exempt)
+    if user.role != "Super Admin" and user.outlet_id:
+        o = (await db.execute(select(M.Outlet).where(M.Outlet.id == user.outlet_id))).scalar_one_or_none()
+        if not o:
+            raise HTTPException(status_code=403, detail=f"Outlet '{user.outlet_id}' sudah dihapus. Hubungi Super Admin untuk assign outlet baru.")
+        if o.active is False:
+            raise HTTPException(status_code=403, detail=f"Outlet '{o.name}' sudah dinonaktifkan. Login ditolak.")
     if user.active is False:
         raise HTTPException(status_code=403, detail="Akun dinonaktifkan")
     # White-Label: enforce merchant subscription status
@@ -345,8 +352,16 @@ async def logout(response: Response):
 # -----------------------------------------------------------------------------
 
 @api_router.get("/outlets")
-async def list_outlets(db: AsyncSession = Depends(get_db), user: M.User = Depends(current_user)):
-    result = await db.execute(select(M.Outlet).order_by(M.Outlet.name))
+async def list_outlets(
+    include_inactive: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(current_user),
+):
+    stmt = select(M.Outlet).order_by(M.Outlet.name)
+    # Non-Super-Admin only sees active outlets; Super Admin sees all if include_inactive=1
+    if user.role != "Super Admin" or not include_inactive:
+        stmt = stmt.where(M.Outlet.active == True)  # noqa: E712
+    result = await db.execute(stmt)
     return [to_dict(o) for o in result.scalars().all()]
 
 
@@ -384,16 +399,37 @@ async def update_outlet(
 @api_router.delete("/outlets/{outlet_id}")
 async def delete_outlet(
     outlet_id: str,
+    hard: bool = False,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin")),
 ):
+    """Soft-delete outlet by default (set active=False). Users bound to it are auto-deactivated.
+    Query ?hard=1 forces DELETE — but blocked if outlet has any transactions/shifts (referential integrity).
+    """
     result = await db.execute(select(M.Outlet).where(M.Outlet.id == outlet_id))
     outlet = result.scalar_one_or_none()
     if not outlet:
         raise HTTPException(status_code=404, detail="Outlet tidak ditemukan")
-    await db.delete(outlet)
+    # Cascading: auto-deactivate all users bound to this outlet
+    users_r = await db.execute(select(M.User).where(M.User.outlet_id == outlet_id))
+    affected_users = users_r.scalars().all()
+    for u in affected_users:
+        u.active = False
+    if hard:
+        # Check for transactions/shifts referencing this outlet
+        sale_count = (await db.execute(select(func.count(M.Sale.id)).where(M.Sale.outlet_id == outlet_id))).scalar_one()
+        shift_count = (await db.execute(select(func.count(M.Shift.id)).where(M.Shift.outlet_id == outlet_id))).scalar_one()
+        if sale_count > 0 or shift_count > 0:
+            raise HTTPException(status_code=400, detail=f"Outlet ini memiliki {sale_count} transaksi & {shift_count} shift. Gunakan soft-delete (nonaktifkan) supaya data historis tetap terjaga.")
+        await db.delete(outlet)
+    else:
+        outlet.active = False
     await db.commit()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "mode": "hard-deleted" if hard else "deactivated",
+        "affected_users": len(affected_users),
+    }
 
 
 # ---- User & Security management (Super Admin only) ----
@@ -404,7 +440,7 @@ class UserInput(BaseModel):
     password: str
     role: str
     name: str
-    outlet_id: str = "outlet-sudirman"
+    outlet_id: Optional[str] = None
     active: bool = True
 
 
@@ -446,6 +482,19 @@ async def create_user(
 ):
     if payload.role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Role harus salah satu dari {ROLES}")
+    # STRICT: Every non-Super-Admin user MUST be bound to an existing ACTIVE outlet
+    if payload.role != "Super Admin":
+        if not payload.outlet_id:
+            raise HTTPException(status_code=400, detail="Outlet wajib dipilih untuk role selain Super Admin")
+        o = (await db.execute(select(M.Outlet).where(M.Outlet.id == payload.outlet_id))).scalar_one_or_none()
+        if not o:
+            raise HTTPException(status_code=400, detail=f"Outlet '{payload.outlet_id}' tidak ditemukan")
+        if o.active is False:
+            raise HTTPException(status_code=400, detail=f"Outlet '{o.name}' sudah dinonaktifkan. Aktifkan dulu atau pilih outlet lain.")
+    # Deduplicate email
+    dup = (await db.execute(select(M.User).where(M.User.email == payload.email.lower().strip()))).scalar_one_or_none()
+    if dup:
+        raise HTTPException(status_code=400, detail=f"Email {payload.email} sudah terdaftar")
     new_user = M.User(
         email=payload.email.lower().strip(),
         username=(payload.username or payload.email.split("@")[0]).lower().strip(),
@@ -622,15 +671,19 @@ async def list_products(
     if user:
         scope = outlet_scope(user, outlet_id)
         if scope:
-            stmt = stmt.where(M.Product.outlet_id == scope)
+            # Include products explicitly for this outlet + products marked global (outlet_id IS NULL or empty)
+            stmt = stmt.where(or_(M.Product.outlet_id == scope, M.Product.outlet_id.is_(None), M.Product.outlet_id == ""))
         # Only Super Admin / Admin on catalog page may see inactive
         if not (include_inactive and user.role in ("Super Admin", "Admin")):
             stmt = stmt.where(M.Product.is_active == True)  # noqa: E712
     else:
-        # Anonymous: must specify outlet + always filter inactive
+        # Anonymous: must specify outlet + include global products + always filter inactive
         if not outlet_id:
             raise HTTPException(status_code=400, detail="outlet_id wajib untuk akses publik")
-        stmt = stmt.where(M.Product.outlet_id == outlet_id, M.Product.is_active == True)  # noqa: E712
+        stmt = stmt.where(
+            or_(M.Product.outlet_id == outlet_id, M.Product.outlet_id.is_(None), M.Product.outlet_id == ""),
+            M.Product.is_active == True,  # noqa: E712
+        )
     result = await db.execute(stmt)
     return [to_dict(p) for p in result.scalars().all()]
 
@@ -641,10 +694,17 @@ async def create_product(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
-    # Admin can only create products for their own outlet; Super Admin unrestricted
-    outlet_id = payload.outlet_id or user.outlet_id or "outlet-sudirman"
-    if user.role == "Admin" and outlet_id != (user.outlet_id or "outlet-sudirman"):
-        raise HTTPException(status_code=403, detail="Admin hanya boleh produk outletnya sendiri")
+    # Admin can only create products for their own outlet; Super Admin can create for any outlet OR global (outlet_id=None)
+    # payload.outlet_id explicitly None or "" ⇒ "Berlaku di semua outlet" (Super Admin only)
+    is_global = payload.outlet_id in (None, "", "all") and user.role == "Super Admin"
+    if is_global:
+        outlet_id = None
+    else:
+        outlet_id = payload.outlet_id or user.outlet_id
+        if not outlet_id:
+            raise HTTPException(status_code=400, detail="outlet_id wajib atau tandai 'Berlaku di semua outlet' (Super Admin)")
+        if user.role == "Admin" and outlet_id != user.outlet_id:
+            raise HTTPException(status_code=403, detail="Admin hanya boleh produk outletnya sendiri")
     product = M.Product(
         id=payload.id or str(uuid.uuid4()),
         name=payload.name,
@@ -1870,12 +1930,20 @@ async def open_shift(
     result = await db.execute(
         select(M.Shift).where(M.Shift.cashier_id == user.id, M.Shift.status == "open")
     )
+    # Validate user has an outlet assigned AND outlet is active (Multi-Tenant hardening)
+    if not user.outlet_id:
+        raise HTTPException(status_code=400, detail="User belum ditugaskan ke outlet manapun. Hubungi Super Admin.")
+    o = (await db.execute(select(M.Outlet).where(M.Outlet.id == user.outlet_id))).scalar_one_or_none()
+    if not o:
+        raise HTTPException(status_code=400, detail=f"Outlet '{user.outlet_id}' tidak ditemukan atau telah dihapus. Hubungi Super Admin.")
+    if o.active is False:
+        raise HTTPException(status_code=400, detail=f"Outlet '{o.name}' sudah dinonaktifkan. Tidak bisa buka shift baru.")
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Shift aktif masih terbuka")
     shift = M.Shift(
         cashier_id=user.id,
         cashier_name=user.name,
-        outlet_id=user.outlet_id or "outlet-sudirman",
+        outlet_id=user.outlet_id,
         opening_cash=payload.opening_cash,
         note=payload.note,
     )
