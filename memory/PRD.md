@@ -286,6 +286,26 @@ See `/app/memory/test_credentials.md`.
 - [x] **Verified via curl (backend isolation)**: Super Admin → POST BSI ke `outlet-banda-aceh` sukses; GET Banda Aceh return BSI; GET Sudirman TIDAK terkontaminasi (masih Bank Aceh original). Super Admin tanpa outlet_id → 400 dengan pesan Indonesia jelas.
 - [x] **Verified via screenshot (UI binding)**: Switch dropdown "MJD Sudirman" → "MJD Banda Aceh" secara real-time mengubah: badge, tombol "Tambah ke {nama}", label "Upload QRIS untuk {nama}", hint id outlet, dan daftar rekening (Bank Aceh Sudirman → BSI Banda Aceh) — 100% sinkron.
 
+## Iteration 28 (Feb 2026 — Global Double-Click Prevention + Sales Idempotency)
+**Goal**: Cegah pembuatan transaksi duplikat saat kasir klik "Konfirmasi pembayaran" berkali-kali di jaringan lambat.
+
+**Backend** (`/api/sales`):
+- [x] **Kolom baru** `mjd_sales.idempotency_key VARCHAR(64)` + index `ix_sales_idempotency` (ALTER TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS di startup migration).
+- [x] **`SaleInput`** tambah field opsional `idempotency_key`. `create_sale` juga baca header `Idempotency-Key`.
+- [x] **Guard replay**: Bila client kirim key yang sama untuk cashier yang sama dalam 15 menit terakhir → **return sale asli** dengan flag `_idempotent_replay: true` (bukan buat duplikat baru). No stock re-deduct, no kitchen ticket ganda.
+- [x] **Verified via curl**: 3 POST berurutan — 1st create (id `b3aa37bf`), 2nd same key returns SAME id + `replay=True`, 3rd different key returns NEW id (`bc617abc`).
+
+**Frontend** (`App.js`):
+- [x] **`useAsyncAction` hook** (sudah ada dari iter26) di-adopsi untuk checkout: `[busyCheckout, runCheckout]`.
+- [x] **`openPayment()` generate idempotency key** via `crypto.randomUUID()` (fallback ke timestamp+random) — sekali per attempt, disimpan di state `checkoutKey`.
+- [x] **`confirmSale()` di-wrap `runCheckout`** — hard-guard klik ganda + kirim key via body **dan** header `Idempotency-Key` (dual-safety). Key di-reset setelah sukses. Offline queue tetap menyimpan payload lengkap dengan key sehingga sinkronisasi ulang tetap idempotent.
+- [x] **`PaymentModal` UX**:
+  - Prop `busy` diteruskan dari App.
+  - Tombol "Konfirmasi pembayaran" disabled + tampilan `⟳ Memproses transaksi…` selama request in-flight.
+  - Modal backdrop `onClose` tidak menutup selama busy (mencegah user meng-close accidental saat proses masih jalan).
+  - Toast "Transaksi sudah tersimpan sebelumnya (duplikasi dicegah)" bila backend menjawab `_idempotent_replay`.
+- [x] **Verified via Playwright**: 4 klik cepat pada tombol Konfirmasi → tombol switch ke "Memproses transaksi…" state, hanya **1 baris** `mjd_sales` tercipta (Rp 18.000, key `dfd4c8d3-99b...`), regressi dibandingkan sesi lama yang tercatat 3 baris identik dalam 2 detik.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).

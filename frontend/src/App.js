@@ -107,6 +107,9 @@ function AdminApp() {
   const [showShiftOpen, setShowShiftOpen] = useState(false);
   const [showShiftClose, setShowShiftClose] = useState(false);
   const [showPayment, setShowPayment] = useState(false);
+  // Idempotency: single key per checkout attempt (regenerated on new payment session)
+  const [checkoutKey, setCheckoutKey] = useState("");
+  const [busyCheckout, runCheckout] = useAsyncAction();
   const [lastSale, setLastSale] = useState(null);
   const [showReceipt, setShowReceipt] = useState(false);
   const [onlineOrders, setOnlineOrders] = useState([]);
@@ -252,11 +255,16 @@ function AdminApp() {
   const openPayment = () => {
     if (!cart.length) return;
     if (session.role === "Kasir" && !shift) { setShowShiftOpen(true); notify("Buka shift terlebih dahulu sebelum bertransaksi"); return; }
+    // Generate a fresh idempotency key for this checkout attempt (persists across retries)
+    const nextKey = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `idem-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setCheckoutKey(nextKey);
     setShowPayment(true);
   };
 
-  const confirmSale = async ({ method, reference, cashReceived }) => {
+  const confirmSale = ({ method, reference, cashReceived }) => runCheckout(async () => {
+    const idempotencyKey = checkoutKey || ((typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `idem-${Date.now()}`);
     const payload = {
+      idempotency_key: idempotencyKey,
       table: "Meja 07",
       lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id, variant_id: i.variant_id || null, variant_name: i.variant_name || "", notes: i.notes || "" })),
       subtotal, tax, total,
@@ -266,26 +274,31 @@ function AdminApp() {
       change_amount: Math.max(0, (Number(cashReceived) || 0) - total),
     };
     try {
-      const { data } = await axios.post(`${API}/sales`, payload, { timeout: 8000 });
+      const { data } = await axios.post(`${API}/sales`, payload, {
+        timeout: 8000,
+        headers: { "Idempotency-Key": idempotencyKey },
+      });
       setLastSale({ ...payload, id: data.id, created_at: data.created_at });
       setShowPayment(false);
       setShowReceipt(true);
+      setCheckoutKey(""); // reset for next checkout
       await reloadProducts();
-      notify("Transaksi berhasil, tiket dapur terkirim");
+      notify(data._idempotent_replay ? "Transaksi sudah tersimpan sebelumnya (duplikasi dicegah)" : "Transaksi berhasil, tiket dapur terkirim");
     } catch (e) {
-      // If network failure, queue offline
+      // If network failure, queue offline (retain idempotency key so backend dedupes on drain)
       if (!navigator.onLine || e.code === "ECONNABORTED" || !e.response) {
         await queueSale(payload);
         const c = await queuedCount();
         setOfflineQueued(c);
         setShowPayment(false);
         setCart([]);
+        setCheckoutKey("");
         notify(`Offline: transaksi disimpan di antrean (${c} pending sync)`);
       } else {
         notify(e.response?.data?.detail || "Gagal menyimpan transaksi");
       }
     }
-  };
+  });
 
   if (authLoading) return <div className="auth-loading" data-testid="auth-loading">Memuat ruang kerja MJD Kupi…</div>;
   if (!session) return <Login onLogin={setSession} />;
@@ -421,7 +434,8 @@ function AdminApp() {
         total={total}
         outletId={session?.outlet_id || (activeOutlet && activeOutlet !== "all" ? activeOutlet : "")}
         outletName={(outlets.find((o) => o.id === (session?.outlet_id || activeOutlet))?.name) || ""}
-        onClose={() => setShowPayment(false)}
+        busy={busyCheckout}
+        onClose={() => { if (!busyCheckout) { setShowPayment(false); setCheckoutKey(""); } }}
         onConfirm={confirmSale} />}
       {showReceipt && lastSale && <ReceiptModal sale={lastSale} merchants={merchants} outlets={outlets} cashier={session?.name || ""} onClose={() => { setShowReceipt(false); setLastSale(null); setCart([]); }} notify={notify} />}
       {showOnlineOrders && <OnlineOrdersModal orders={onlineOrders} onClose={() => setShowOnlineOrders(false)} reload={reloadOnlineOrders} notify={notify} onAcceptDone={() => reloadProducts()} />}
@@ -724,7 +738,7 @@ function VariantPickerModal({ product, onClose, onAdd }) {
 }
 
 // -------- Payment Modal (multi-channel) --------
-function PaymentModal({ total, outletId, outletName, onClose, onConfirm }) {
+function PaymentModal({ total, outletId, outletName, busy = false, onClose, onConfirm }) {
   const [method, setMethod] = useState("Cash");
   const [cash, setCash] = useState(total);
   const [ref, setRef] = useState("");
@@ -843,12 +857,14 @@ function PaymentModal({ total, outletId, outletName, onClose, onConfirm }) {
         {proofData && <div className="proof-thumb"><img src={proofData} alt="Bukti" /><Check size={16} color="#059669" /></div>}
       </div>}
       {source === "cache" && <div className="empty-hint" data-testid="payment-cache-badge" style={{ margin: "8px 0", background: "#fef3c7", color: "#92400e", fontSize: 12 }}>📴 Data pembayaran outlet dari cache offline — akan otomatis sinkron ulang saat online.</div>}
-      <button className="primary-btn full" disabled={!canPay} onClick={() => {
+      <button className="primary-btn full" disabled={!canPay || busy} onClick={() => {
         const reference = method === "Transfer" && selectedBank
           ? `${selectedBank.bank_name}-${selectedBank.account_number} · ${ref.trim()}`
           : (ref.trim() || (proofData ? proofData.slice(0, 60) : ""));
         onConfirm({ method, reference, cashReceived: cash });
-      }} data-testid="confirm-payment-button">Konfirmasi pembayaran <span>→</span></button>
+      }} data-testid="confirm-payment-button">
+        {busy ? <><RefreshCw size={14} className="spin"/> Memproses transaksi…</> : <>Konfirmasi pembayaran <span>→</span></>}
+      </button>
     </div>
   </div>;
 }
