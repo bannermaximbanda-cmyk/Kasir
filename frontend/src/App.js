@@ -543,7 +543,7 @@ function Overview({ products, expenses, setPage, activeOutlet }) {
         <div className="panel-head"><div><h2>Stok Menipis</h2><span>Butuh restock segera</span></div><button className="text-btn" onClick={() => setPage("inventory")}>Semua →</button></div>
         <div className="lowstock-list">
           {data.low_stock?.length ? data.low_stock.slice(0, 5).map((p) => <div className="lowstock-row" key={p.id}>
-            <div className="ls-info"><b>{p.name}</b><span>{p.vendor} · {p.outlet_id.replace("outlet-", "")}</span></div>
+            <div className="ls-info"><b>{p.name}</b><span>{p.vendor} · {p.outlet_id ? p.outlet_id.replace("outlet-", "") : "semua outlet"}</span></div>
             <div className="ls-stock">
               <strong className={p.stock === 0 ? "danger" : "warn"}>{p.stock}</strong>
               <small>/ min {p.min}</small>
