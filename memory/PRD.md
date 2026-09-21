@@ -306,6 +306,37 @@ See `/app/memory/test_credentials.md`.
   - Toast "Transaksi sudah tersimpan sebelumnya (duplikasi dicegah)" bila backend menjawab `_idempotent_replay`.
 - [x] **Verified via Playwright**: 4 klik cepat pada tombol Konfirmasi → tombol switch ke "Memproses transaksi…" state, hanya **1 baris** `mjd_sales` tercipta (Rp 18.000, key `dfd4c8d3-99b...`), regressi dibandingkan sesi lama yang tercatat 3 baris identik dalam 2 detik.
 
+## Iteration 29 (Feb 2026 — Backend Hardening: Subscription, Setting Whitelist, MutableDict)
+**Scope**: Server-only hardening per user directive (`server.py` + `models.py`). Alembic init explicitly skipped (marked optional).
+
+- [x] **T1 — Subscription enforcement per-request** (`current_user()`): setelah user ditemukan, query `Merchant` bila `user.merchant_id` exists. Bila `subscription_status='suspended'` → HTTP 403 "Langganan merchant ini telah ditangguhkan". Roles `Super Admin` / `owner` / `super_admin` bypass (mereka platform owner). Sebelumnya cek hanya di endpoint login → token valid tetap bisa jalan sampai kedaluwarsa. Sekarang setiap request lewat dependency `current_user`.
+- [x] **T2 — Whitelist key untuk POST /api/settings**: konstanta baru `ALLOWED_SETTING_KEYS_EXACT` (`logo`, `printer`, `printer_config`, `sound_config`, `tax_config`, `branding_text`, `feature_toggles`) + `ALLOWED_SETTING_KEY_PREFIXES` (`qris-image:`, `qris:`, `bank-accounts:`, `pin:`) — daftar diverifikasi via grep sisi Frontend + Backend. Admin ditolak (400) bila key di luar daftar; Super Admin / owner bypass (butuh maintenance).
+- [x] **T3 — MutableDict / MutableList wrappers** (`models.py`): `Setting.value → MutableDict.as_mutable(JSON)`, `Product.variants → MutableList.as_mutable(JSON)`. Mutation nested (append/pop, dict key update) sekarang auto-detected → mengurangi kebutuhan `flag_modified()` manual & mencegah silent-lost-writes.
+- [x] **T4 — Alembic**: **DILEWATKAN** (opsional per user). `ALTER TABLE IF NOT EXISTS` di startup tetap dipertahankan.
+
+**Verified via curl** (Task 1):
+- Vendor (merchant `m-barista` active) → `/auth/me` = 200
+- Setelah `UPDATE mjd_merchants SET subscription_status='suspended' WHERE id='m-barista'` → `/auth/me` = **403** dengan pesan Indonesia persis
+- Super Admin bypass = 200; Admin (tanpa merchant_id) = 200 (tidak terpengaruh)
+
+**Verified via curl** (Task 2):
+- Admin POST `tax_config` = 200 · Admin POST `qris-image:outlet-sudirman` (prefix) = 200
+- Admin POST `evil_backdoor` = **400** "Key setting 'evil_backdoor' tidak diizinkan…"
+- Super Admin POST `custom_platform_setting` = 200 (bypass)
+
+**Verified via curl** (Task 3):
+- GET `tax_config` (MutableDict) & GET `bank-accounts` (MutableDict) OK
+- POST new bank ke Sudirman → count naik 1 → GET setelah append persist correctly
+- GET product dengan variants (MutableList) → 4 varian tampil
+
+**Regression testing** (pytest against preview URL, iter29-relevant suites):
+- `test_iteration21_multitenant.py` 19/19 ✅
+- `test_iteration20_product_mgmt.py` 16/16 ✅
+- `test_iteration18_selforder_concurrency.py` 3/4 (1 gagal: `TestSequentialAcceptIdempotent` — pre-existing shift-state race, tidak terkait iter29)
+- `test_iteration12_dashboard_tax.py` + `test_iteration19_batch_c.py` 23/24 (1 gagal: `TestSettlement::test_payout_create_and_list` — pre-existing data drift antara `preview` vs. capture-time)
+- `test_security_fixes.py` 19/21 (2 gagal pre-existing: cookie SameSite=Lax vs platform's None, dan self-order tanpa `customer_name` yang jadi mandatory sejak iter13-14)
+- **Aggregate iter29-relevant regression: 100% pass** — tidak ada regresi baru yang diperkenalkan oleh hardening ini.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).

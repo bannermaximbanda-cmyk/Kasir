@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, JSON, Index,
 )
+from sqlalchemy.ext.mutable import MutableDict, MutableList
 from database import Base
 
 
@@ -84,8 +85,10 @@ class Product(Base):
     color = Column(String(16), default="#ffedd5")
     image_url = Column(Text, default="")
     modifiers = Column(JSON, default=list)
-    # Variants: [{id, name (Panas/Ice), price, cost, active}] — overrides price/cost when chosen
-    variants = Column(JSON, default=list)
+    # Variants: [{id, name (Panas/Ice), price, cost, active}] — overrides price/cost when chosen.
+    # MutableList wrapper: SQLAlchemy will auto-detect in-place mutations (append/pop/slice-assign)
+    # so we no longer need `flag_modified(row, "variants")` after edits.
+    variants = Column(MutableList.as_mutable(JSON), default=list)
 
 
 class StockLog(Base):
@@ -189,7 +192,9 @@ class Shift(Base):
 class Setting(Base):
     __tablename__ = "mjd_settings"
     key = Column(String(64), primary_key=True)
-    value = Column(JSON, default=dict)
+    # MutableDict wrapper: mutations to nested dict (e.g. row.value["accounts"].append(...))
+    # are auto-detected — avoids silent no-op writes when SQLAlchemy misses in-place changes.
+    value = Column(MutableDict.as_mutable(JSON), default=dict)
     updated_at = Column(DateTime(timezone=True), default=utc_now)
 
 

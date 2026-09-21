@@ -178,6 +178,26 @@ class SettingInput(BaseModel):
     value: Any
 
 
+# Iter29 hardening: whitelist for POST /api/settings.
+# Exact keys used across the codebase (grep confirmed in App.js + server.py).
+ALLOWED_SETTING_KEYS_EXACT = {
+    "logo",
+    "printer",
+    "printer_config",
+    "sound_config",
+    "tax_config",
+    "branding_text",
+    "feature_toggles",
+}
+# Prefixed keys (per-outlet variants). Anything starting with one of these prefixes is allowed.
+ALLOWED_SETTING_KEY_PREFIXES = (
+    "qris-image:",
+    "qris:",
+    "bank-accounts:",
+    "pin:",
+)
+
+
 class KdsStatusInput(BaseModel):
     status: str  # Diproses | Siap diambil | Selesai
 
@@ -231,6 +251,13 @@ async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> 
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="Sesi tidak valid")
+    # Iter29 hardening: enforce merchant subscription on EVERY request (not just login).
+    # Super Admin / owner-level roles bypass — they own the platform.
+    if user.role not in ("Super Admin", "owner", "super_admin") and user.merchant_id:
+        mres = await db.execute(select(M.Merchant).where(M.Merchant.id == user.merchant_id))
+        merchant = mres.scalar_one_or_none()
+        if merchant and merchant.subscription_status == "suspended":
+            raise HTTPException(status_code=403, detail="Langganan merchant ini telah ditangguhkan")
     return user
 
 
@@ -2339,15 +2366,23 @@ async def upsert_setting(
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
-    result = await db.execute(select(M.Setting).where(M.Setting.key == payload.key))
+    # Iter29 hardening: only allow known keys via this generic endpoint.
+    # Super Admin (platform owner) can still write any key (needed for maintenance / new features).
+    # Admin is restricted to the whitelist to prevent accidental / malicious writes to arbitrary
+    # setting rows (e.g. feature_toggles, bank-accounts:*, etc. — those have dedicated endpoints).
+    key = (payload.key or "").strip()
+    if user.role not in ("Super Admin", "owner", "super_admin"):
+        if not (key in ALLOWED_SETTING_KEYS_EXACT or any(key.startswith(p) for p in ALLOWED_SETTING_KEY_PREFIXES)):
+            raise HTTPException(status_code=400, detail=f"Key setting '{key}' tidak diizinkan. Hubungi Super Admin.")
+    result = await db.execute(select(M.Setting).where(M.Setting.key == key))
     row = result.scalar_one_or_none()
     if row:
         row.value = payload.value
         row.updated_at = datetime.now(timezone.utc)
     else:
-        db.add(M.Setting(key=payload.key, value=payload.value))
+        db.add(M.Setting(key=key, value=payload.value))
     await db.commit()
-    return {"ok": True, "key": payload.key}
+    return {"ok": True, "key": key}
 
 
 # Convenience endpoint for legacy QRIS write path

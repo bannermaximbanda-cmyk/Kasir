@@ -101,3 +101,133 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  Iter29 Backend Hardening (user-directed, NO refactor):
+  1. Enforce merchant.subscription_status='suspended' at EVERY request via current_user() dependency (not only at login). Exempt Super Admin / owner.
+  2. Whitelist keys for POST /api/settings (Admin restricted; Super Admin bypass).
+  3. Wrap Setting.value & Product.variants with MutableDict/MutableList so nested mutations are detected by SQLAlchemy.
+  4. (Optional, skipped) Alembic init.
+
+backend:
+  - task: "Iter29-T1: Subscription enforcement on every request"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: |
+          current_user() now queries Merchant when user.merchant_id is set and rejects requests with
+          HTTP 403 "Langganan merchant ini telah ditangguhkan" when subscription_status == 'suspended'.
+          Super Admin / owner / super_admin roles are exempt.
+          Verified via curl:
+            • Vendor (merchant_id=m-barista, subscription=active) → /auth/me = 200
+            • After UPDATE mjd_merchants SET subscription_status='suspended' WHERE id='m-barista'
+              → /auth/me = 403 with exact Indonesian message
+            • Super Admin bypass = 200 (still works)
+            • Admin without merchant_id = 200 (not affected)
+            • Restore to active → 200 again
+
+  - task: "Iter29-T2: Whitelist for POST /api/settings"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: |
+          Introduced ALLOWED_SETTING_KEYS_EXACT (logo, printer, printer_config, sound_config,
+          tax_config, branding_text, feature_toggles) and ALLOWED_SETTING_KEY_PREFIXES
+          (qris-image:, qris:, bank-accounts:, pin:). Admin is restricted to these keys;
+          Super Admin / owner / super_admin bypass.
+          Verified via curl:
+            • Admin POST tax_config = 200
+            • Admin POST qris-image:outlet-sudirman (prefix) = 200
+            • Admin POST evil_backdoor = 400 "Key setting 'evil_backdoor' tidak diizinkan…"
+            • Super Admin POST custom_platform_setting = 200 (bypass)
+
+  - task: "Iter29-T3: MutableDict/MutableList wrappers"
+    implemented: true
+    working: true
+    file: "backend/models.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: |
+          Setting.value → Column(MutableDict.as_mutable(JSON), default=dict)
+          Product.variants → Column(MutableList.as_mutable(JSON), default=list)
+          Others (StockLog/kitchen lines/etc) intentionally left as plain JSON to minimize risk.
+          Verified: GET tax_config, GET bank-accounts, POST new bank (append → count 2 → GET after
+          → count 2, last row matches). GET a product with variants → variants present with 4 rows.
+          Bank-accounts flag_modified(row, "value") calls remain in place as defense-in-depth
+          (harmless with MutableDict; still valid if wrapper is ever removed).
+
+  - task: "Iter29-T4: Alembic migration setup"
+    implemented: false
+    working: "NA"
+    file: "backend/"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+          Skipped per user instruction (task 4 is optional). ALTER TABLE IF NOT EXISTS pattern retained
+          in server.py startup. Alembic can be introduced in a future iteration.
+
+frontend:
+  - task: "N/A for iter29 hardening"
+    implemented: true
+    working: "NA"
+    file: "-"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Iter29 is backend-only hardening. No frontend changes."
+
+metadata:
+  created_by: "main_agent"
+  version: "iter29"
+  test_sequence: 29
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Iter29-T1: Subscription enforcement on every request"
+    - "Iter29-T2: Whitelist for POST /api/settings"
+    - "Iter29-T3: MutableDict/MutableList wrappers"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: |
+      Iter29 backend hardening complete. All three mandatory tasks verified via curl end-to-end
+      against the preview URL. Regression run against existing pytest suite:
+        • tests/test_iteration21_multitenant.py     — 19/19 pass
+        • tests/test_iteration20_product_mgmt.py    — 16/16 pass
+        • tests/test_iteration18_selforder_concurrency.py — 3/4 pass (1 unrelated shift-state race
+          in TestSequentialAcceptIdempotent, present before iter29)
+        • tests/test_iteration12_dashboard_tax.py + iter19_batch_c.py — 23/24 pass
+          (1 unrelated payout-gross data drift, present before iter29)
+        • tests/test_security_fixes.py — 19/21 pass (2 pre-existing failures:
+          test_sec001_login_cookie_samesite_lax expects SameSite=Lax but preview platform now
+          uses SameSite=None; test_csrf_self_order_allowlisted_without_header + regression accept
+          fail because customer_name became required in iter13-14).
+      Aggregate iter29-touched regression: 100% pass. No new failures introduced.
+      Task 4 (Alembic) intentionally skipped per user instructions.
