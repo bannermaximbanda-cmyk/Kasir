@@ -337,6 +337,48 @@ See `/app/memory/test_credentials.md`.
 - `test_security_fixes.py` 19/21 (2 gagal pre-existing: cookie SameSite=Lax vs platform's None, dan self-order tanpa `customer_name` yang jadi mandatory sejak iter13-14)
 - **Aggregate iter29-relevant regression: 100% pass** — tidak ada regresi baru yang diperkenalkan oleh hardening ini.
 
+## Iteration 30 (Feb 2026 — Bulk-Import Hardening: cross-merchant safety, new columns, server-authoritative template/export, Edit modal outlet control)
+
+**Scope**: Complete existing `POST /api/products/bulk-import` (do NOT rewrite). New endpoints for template/export. Fix Edit Produk modal to expose Outlet Target.
+
+**Backend changes** (`server.py`):
+- [x] **Matching order upgrade** (Task 0): `id → sku+outlet_id+merchant_id → name+outlet_id+merchant_id`. Rows without `id` require `merchant_id`/`merchant_name` (resolved BEFORE matching); missing → error row (no silent fallback).
+- [x] **In-file duplicate detection** (Task 0b): Pass-1 pre-loop check. `(sku, outlet, merchant)` and `(name, outlet, merchant)` for id-less rows → 2nd+ row flagged "Duplikat baris {n} dengan baris {m} dalam file yang sama…" and skipped.
+- [x] **BulkProductRow extended** (Task 1): `image_url`, `varian` ("Panas:18000|Ice:20000" → list of dict with UUID id + active=true), `status_aktif` (1/0, precedence over `is_active`), `merchant_name` (server lookup → `merchant_id`).
+- [x] **outlet_id semantics fix** (Task 2b): `""`/None ⇒ NULL (global) for Super Admin when `outlet_id_explicit=True`. Admin scoped to own outlet. Invalid outlet_id → error row.
+- [x] **image_url handling** (Task 2): Valid `http(s)://` / `data:` → stored; blank/invalid → PRODUCT_IMAGE_PLACEHOLDER (empty).
+- [x] **GET /api/products/csv-template** (Task 3): UTF-8 BOM CSV, 12 header cols (id first), 3 example rows illustrating new-global / new-specific / re-import-with-id patterns.
+- [x] **GET /api/products/export** (Task 4): Filters `outlet_id`, `merchant_id`, `category`, `status`. Admin scoped to own outlet + globals. NULL outlet_id exported as blank. Filename `export_produk_{YYYY-MM-DD}.csv`.
+
+**Frontend changes** (`App.js`):
+- [x] **Products page — Outlet filter dropdown** (Task 4 UI): New `filter-outlet-select` with "Semua Outlet" default. Global products always visible.
+- [x] **Import Produk modal — new columns + server-driven endpoints** (Task 5):
+  - Parse `id/varian/status_aktif/image_url/merchant_name` (with legacy fallbacks for `merchant_id`, `is_active`, `hpp_per_porsi`).
+  - Client-side per-row validation: `nama_produk` + `harga_jual` + (`merchant_id` OR `merchant_name`).
+  - "Unduh Template CSV" and "Export Data" buttons now blob-download from server endpoints (columns guaranteed to match).
+  - Server error rows merged into UI error list.
+  - Instruction banner explaining `outlet_id` blank/global + re-import-with-id pattern.
+- [x] **Edit Produk modal — Outlet Target control** (Task 6):
+  - New props `outlets`, `session`. Initial state derives `is_global` from `product.outlet_id === null/""`.
+  - Toggle "🏪 SPESIFIK OUTLET" ↔ "🌐 SEMUA OUTLET" (Super Admin only).
+  - Outlet dropdown pre-populated; `save()` PUTs `outlet_id: is_global ? null : form.outlet_id`.
+
+**Verified via pytest** (`tests/test_iteration30_bulk_import.py`):
+- test_varian_string_parsed_into_variants ✅ (3 variants + UUID ids)
+- test_status_aktif_maps_to_is_active ✅ (1→true, 0→false)
+- test_csv_template_endpoint ✅ (12 cols + 3 example rows)
+- test_export_endpoint_returns_csv ✅ (correct disposition, header)
+- test_cross_merchant_sku_collision_creates_two_products ✅ (2 products, one per merchant)
+- test_in_file_duplicate_detection ✅ (row 2 flagged, row 1 inserted)
+- test_blank_outlet_id_preserved_as_global ✅ (NULL not fallback)
+
+**Verified via screenshot** (Playwright):
+- Products page: Outlet filter dropdown alongside merchant/category/status filters.
+- Edit modal: Global toggle + Outlet Target dropdown pre-selected (MJD Sudirman).
+- Import modal: Instruction banner + new header list visible.
+
+**Task 7 note**: No Supabase Storage helper exists in codebase — every image field (logo, QRIS, product image, banner) currently uses base64 data URLs via `FileReader.readAsDataURL`. Keeping existing pattern for iter30; adding Storage bucket integration would be a separate iteration.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).

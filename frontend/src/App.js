@@ -1292,6 +1292,7 @@ function Products({ products, merchants, outlets = [], session, reload, notify }
   const [filterCat, setFilterCat] = useState("Semua");
   const [filterMerchant, setFilterMerchant] = useState("Semua");
   const [statusTab, setStatusTab] = useState("all"); // all | active | inactive
+  const [filterOutlet, setFilterOutlet] = useState("Semua");
   useEffect(() => { if (!form.merchant_id && merchants.length) setForm((f) => ({ ...f, merchant_id: merchants[0].id })); }, [merchants]);
 
   const save = async () => {
@@ -1326,43 +1327,46 @@ function Products({ products, merchants, outlets = [], session, reload, notify }
     if (statusTab === "inactive" && p.is_active !== false) return false;
     if (filterCat !== "Semua" && p.category !== filterCat) return false;
     if (filterMerchant !== "Semua" && p.merchant_id !== filterMerchant) return false;
+    if (filterOutlet !== "Semua" && p.outlet_id && p.outlet_id !== filterOutlet) return false; // global (null) always shown
     if (search) {
       const s = search.toLowerCase();
       if (!p.name.toLowerCase().includes(s) && !(p.sku || "").toLowerCase().includes(s)) return false;
     }
     return true;
-  }), [products, search, filterCat, filterMerchant, statusTab]);
+  }), [products, search, filterCat, filterMerchant, filterOutlet, statusTab]);
   const counts = useMemo(() => ({
     all: products.length,
     active: products.filter((p) => p.is_active !== false).length,
     inactive: products.filter((p) => p.is_active === false).length,
   }), [products]);
 
-  // CSV Template & Export
-  const downloadCSVTemplate = () => {
-    const headers = ["nama_produk", "sku", "merchant_id", "kategori", "harga_jual", "hpp_per_porsi", "stok_awal", "outlet_id", "is_active"];
-    const example = ["Es Kopi Pandan", "KP-001", merchants[0]?.id || "m-barista", "Kopi", "25000", "12000", "50", "outlet-sudirman", "true"];
-    const csv = headers.join(",") + "\n" + example.map((v) => `"${v}"`).join(",");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "mjd-template-produk.csv";
-    a.click();
-    notify("Template CSV berhasil diunduh");
+  // CSV Template & Export — hit server-authoritative endpoints so header/columns match bulk-import strictly.
+  const downloadCSVTemplate = async () => {
+    try {
+      const res = await axios.get(`${API}/products/csv-template`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = "template_produk.csv"; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      notify("Template CSV berhasil diunduh — kolom sesuai dengan endpoint bulk-import");
+    } catch (e) { notify("❌ Gagal unduh template"); }
   };
-  const exportCatalog = () => {
-    const rows = products.map((p) => ({
-      id: p.id, nama_produk: p.name, sku: p.sku || "", merchant_id: p.merchant_id || "",
-      kategori: p.category, harga_jual: p.price, hpp_per_porsi: p.cost, stok_awal: p.stock,
-      outlet_id: p.outlet_id || "outlet-sudirman", is_active: p.is_active !== false ? "true" : "false",
-      varian: (p.variants || []).length,
-      image_url: p.image_url ? "yes" : "",
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Katalog Produk");
-    XLSX.writeFile(wb, `mjd-catalog-${new Date().toISOString().slice(0,10)}.xlsx`);
-    notify(`${rows.length} produk diekspor ke Excel`);
+  const exportCatalog = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (filterMerchant !== "Semua") params.set("merchant_id", filterMerchant);
+      if (filterCat !== "Semua") params.set("category", filterCat);
+      if (statusTab === "active") params.set("status", "active");
+      if (statusTab === "inactive") params.set("status", "inactive");
+      if (filterOutlet !== "Semua") params.set("outlet_id", filterOutlet);
+      const res = await axios.get(`${API}/products/export?${params.toString()}`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      const dateStr = new Date().toISOString().slice(0, 10);
+      a.href = url; a.download = `export_produk_${dateStr}.csv`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      notify("Katalog produk diekspor ke CSV");
+    } catch (e) { notify("❌ Gagal ekspor katalog"); }
   };
 
   return <>
@@ -1386,6 +1390,10 @@ function Products({ products, merchants, outlets = [], session, reload, notify }
       <select value={filterMerchant} onChange={(e) => setFilterMerchant(e.target.value)} data-testid="filter-merchant-select">
         <option value="Semua">Semua Merchant</option>
         {merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+      </select>
+      <select value={filterOutlet} onChange={(e) => setFilterOutlet(e.target.value)} data-testid="filter-outlet-select">
+        <option value="Semua">Semua Outlet</option>
+        {outlets.filter((o) => o.active !== false).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
       </select>
       <div className="pf-tabs">
         <button className={statusTab === "all" ? "active" : ""} onClick={() => setStatusTab("all")} data-testid="status-tab-all">Semua ({counts.all})</button>
@@ -1465,17 +1473,20 @@ function Products({ products, merchants, outlets = [], session, reload, notify }
         </div>;
       })}
     </div>
-    {editProduct && <ProductEditModal product={editProduct} merchants={merchants} onClose={() => setEditProduct(null)} onSaved={() => { setEditProduct(null); reload(); notify("Produk tersimpan"); }} notify={notify} />}
-    {showImport && <BulkImportModal merchants={merchants} onClose={() => setShowImport(false)} onDone={(msg) => { setShowImport(false); reload(); notify(msg); }} />}
+    {editProduct && <ProductEditModal product={editProduct} merchants={merchants} outlets={outlets} session={session} onClose={() => setEditProduct(null)} onSaved={() => { setEditProduct(null); reload(); notify("Produk tersimpan"); }} notify={notify} />}
+    {showImport && <BulkImportModal merchants={merchants} outlets={outlets} session={session} onClose={() => setShowImport(false)} onDone={(msg) => { setShowImport(false); reload(); notify(msg); }} />}
   </>;
 }
 
-function ProductEditModal({ product, merchants, onClose, onSaved, notify }) {
+function ProductEditModal({ product, merchants, outlets = [], session, onClose, onSaved, notify }) {
+  const initialOutletId = product.outlet_id || "";
   const [form, setForm] = useState({
     name: product.name || "",
     sku: product.sku || "",
     category: product.category || "Kopi",
     merchant_id: product.merchant_id || (merchants[0]?.id || ""),
+    is_global: product.outlet_id === null || product.outlet_id === undefined || product.outlet_id === "",
+    outlet_id: initialOutletId,
     price: product.price || 0,
     cost: product.cost || 0,
     stock: product.stock || 0,
@@ -1491,10 +1502,16 @@ function ProductEditModal({ product, merchants, onClose, onSaved, notify }) {
   const rmV = (i) => setForm({ ...form, variants: form.variants.filter((_, idx) => idx !== i) });
   const save = async () => {
     if (!form.name) return notify("Nama produk wajib diisi");
+    if (!form.is_global && !form.outlet_id) return notify("Pilih outlet target atau aktifkan 'Berlaku di semua outlet'");
     setSaving(true);
     try {
       const vendor = merchants.find((m) => m.id === form.merchant_id)?.name || "MJD Kupi";
-      await axios.put(`${API}/products/${product.id}`, { ...form, vendor, price: Number(form.price) || 0, cost: Number(form.cost) || 0, stock: Number(form.stock) || 0, variants: form.variants });
+      const outlet_id = form.is_global ? null : form.outlet_id;
+      await axios.put(`${API}/products/${product.id}`, {
+        ...form, vendor, outlet_id,
+        price: Number(form.price) || 0, cost: Number(form.cost) || 0, stock: Number(form.stock) || 0,
+        variants: form.variants,
+      });
       onSaved();
     } catch (e) { notify(e.response?.data?.detail || "Gagal simpan produk"); }
     setSaving(false);
@@ -1518,6 +1535,14 @@ function ProductEditModal({ product, merchants, onClose, onSaved, notify }) {
         <label className="field-lg"><span>Nama produk</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="edit-product-name-input" /></label>
         <label><span>SKU / Barcode</span><input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} data-testid="edit-product-sku-input" /></label>
         <label><span>Merchant</span><select value={form.merchant_id} onChange={(e) => setForm({ ...form, merchant_id: e.target.value })} data-testid="edit-product-merchant-select">{merchants.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+        {session?.role === "Super Admin" && <label className="switch-lg" data-testid="edit-product-global-toggle-wrapper">
+          <input type="checkbox" checked={form.is_global} onChange={(e) => setForm({ ...form, is_global: e.target.checked, outlet_id: e.target.checked ? "" : (form.outlet_id || outlets.find((o) => o.active !== false)?.id || "") })} data-testid="edit-product-global-toggle" />
+          <i /><span>{form.is_global ? "🌐 SEMUA OUTLET" : "🏪 SPESIFIK OUTLET"}</span>
+        </label>}
+        {!form.is_global && <label><span>Outlet Target</span><select value={form.outlet_id} onChange={(e) => setForm({ ...form, outlet_id: e.target.value })} data-testid="edit-product-outlet-select" disabled={session?.role !== "Super Admin"}>
+          <option value="">— Pilih Outlet —</option>
+          {outlets.filter((o) => o.active !== false).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+        </select></label>}
         <label><span>Kategori</span><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} data-testid="edit-product-category-select">{["Kopi", "Non-Kopi", "Makanan", "Snack"].map((c) => <option key={c}>{c}</option>)}</select></label>
         <label><span>Harga jual (Rp)</span><input type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} onFocus={numOnFocus} data-testid="edit-product-price-input" /></label>
         <label><span>HPP per porsi (Rp)</span><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} onFocus={numOnFocus} data-testid="edit-product-cost-input" /></label>
@@ -1547,7 +1572,7 @@ function ProductEditModal({ product, merchants, onClose, onSaved, notify }) {
   </div></div>;
 }
 
-function BulkImportModal({ merchants, onClose, onDone }) {
+function BulkImportModal({ merchants, outlets = [], session, onClose, onDone }) {
   const [rows, setRows] = useState([]);
   const [errors, setErrors] = useState([]);
   const [uploading, setUploading] = useState(false);
@@ -1559,32 +1584,50 @@ function BulkImportModal({ merchants, onClose, onDone }) {
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: "array" });
-      const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-      const seenSku = new Set();
-      const dedup = [];
-      const errs = [];
+      const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
+      // Column normalization: accept old & new header names.
+      const parsed = [];
+      const localErrs = [];
       raw.forEach((r, i) => {
+        const rowNum = i + 2; // header is row 1
         const name = String(r.nama_produk || r.name || r.Nama || "").trim();
-        const sku = String(r.sku || r.SKU || "").trim();
-        if (!name) { errs.push({ row: i + 2, error: "nama_produk kosong" }); return; }
-        if (sku && seenSku.has(sku)) { errs.push({ row: i + 2, error: `SKU duplikat: ${sku}` }); return; }
-        if (sku) seenSku.add(sku);
-        const isActiveRaw = String(r.is_active ?? "true").toLowerCase();
-        dedup.push({
-          id: r.id || null,
+        const merchantName = String(r.merchant_name || "").trim();
+        const merchantId = String(r.merchant_id || "").trim();
+        const price = Number(String(r.harga_jual || r.price || r.Harga || 0).toString().replace(/[^\d.-]/g, "")) || 0;
+        // Per-row required-field validation (frontend gate before server hits)
+        if (!name) { localErrs.push({ row: rowNum, error: "nama_produk kosong" }); return; }
+        if (!price) { localErrs.push({ row: rowNum, error: "harga_jual kosong / bukan angka" }); return; }
+        if (!merchantId && !merchantName && !r.id) { localErrs.push({ row: rowNum, error: "merchant_id atau merchant_name wajib (kecuali baris punya id)" }); return; }
+        // status_aktif: accept 1/0, "true"/"false", "aktif"/"tidak"
+        let statusAktif = null;
+        if (r.status_aktif !== undefined && r.status_aktif !== "") {
+          const s = String(r.status_aktif).toLowerCase().trim();
+          statusAktif = (s === "1" || s === "true" || s === "aktif" || s === "ya") ? 1 : 0;
+        } else if (r.is_active !== undefined && r.is_active !== "") {
+          const s = String(r.is_active).toLowerCase().trim();
+          statusAktif = (s === "false" || s === "0" || s === "tidak") ? 0 : 1;
+        }
+        parsed.push({
+          id: r.id ? String(r.id).trim() : null,
           name,
-          sku,
+          sku: String(r.sku || r.SKU || "").trim(),
           category: String(r.kategori || r.category || "Lain-lain"),
-          merchant_id: r.merchant_id || null,
-          outlet_id: r.outlet_id || "outlet-sudirman",
-          price: Number(r.harga_jual || r.price || r.Harga || 0),
-          cost: Number(r.hpp_per_porsi || r.cost || r.HPP || 0),
-          stock: Number(r.stok_awal || r.stock || r.Stok || 0),
-          is_active: !(isActiveRaw === "false" || isActiveRaw === "0" || isActiveRaw === "tidak"),
+          merchant_id: merchantId || null,
+          merchant_name: merchantName || null,
+          // Passthrough as-is: "" = global, real id = outlet-specific, missing → sent as ""
+          outlet_id: r.outlet_id !== undefined ? String(r.outlet_id).trim() : "",
+          price,
+          cost: Number(String(r.hpp_modal || r.hpp_per_porsi || r.cost || r.HPP || 0).toString().replace(/[^\d.-]/g, "")) || 0,
+          stock: Number(String(r.stok_awal || r.stock || r.Stok || 0).toString().replace(/[^\d.-]/g, "")) || 0,
+          image_url: String(r.image_url || "").trim(),
+          varian: String(r.varian || "").trim(),
+          status_aktif: statusAktif,
+          is_active: statusAktif === null ? true : Boolean(statusAktif),
           color: r.color || "#ffedd5",
         });
       });
-      setRows(dedup); setErrors(errs);
+      setRows(parsed);
+      setErrors(localErrs);
     } catch (e) { setErrors([{ row: 0, error: "Gagal parsing file: " + e.message }]); }
   };
 
@@ -1592,15 +1635,22 @@ function BulkImportModal({ merchants, onClose, onDone }) {
     if (!rows.length) return;
     setUploading(true);
     try {
-      const { data } = await axios.post(`${API}/products/bulk-import`, { rows, mode: "upsert" });
-      onDone(`Import selesai: ${data.created} baru, ${data.updated} diperbarui, ${(data.errors?.length || 0) + errors.length} error`);
-    } catch (e) { setErrors([{ row: 0, error: e.response?.data?.detail || "Upload gagal" }]); }
+      const { data } = await axios.post(`${API}/products/bulk-import`, { rows, mode: "upsert", outlet_id_explicit: true });
+      const okCount = (data.created || 0) + (data.updated || 0);
+      const errCount = (data.errors?.length || 0) + errors.length;
+      // Merge server errors into UI so user can act on them
+      if (data.errors?.length) setErrors((prev) => [...prev, ...data.errors]);
+      onDone(`✅ Berhasil mengimpor ${okCount} produk (${data.created} baru, ${data.updated} diperbarui), ${errCount} gagal/invalid`);
+    } catch (e) { setErrors((prev) => [...prev, { row: 0, error: e.response?.data?.detail || "Upload gagal" }]); }
     setUploading(false);
   };
 
   return <div className="modal-backdrop"><div className="pay-modal wide" data-testid="bulk-import-modal">
     <button className="modal-close" onClick={onClose}><X size={18}/></button>
-    <div className="pay-head"><h2>Import Produk (Bulk)</h2><span>Upload file .csv / .xlsx / .xls — auto dedup by SKU</span></div>
+    <div className="pay-head"><h2>Import Produk (Bulk)</h2><span>Upload file .csv / .xlsx / .xls — kolom: id, nama_produk, sku, merchant_name, kategori, harga_jual, hpp_modal, stok_awal, outlet_id, image_url, varian, status_aktif</span></div>
+    <div className="empty-hint" style={{ background: "#fff7ed", color: "#9a3412", marginBottom: 8 }} data-testid="bulk-import-instructions">
+      💡 <b>Tips:</b> Kosongkan <code>outlet_id</code> untuk produk berlaku di <b>SEMUA</b> outlet · isi ID outlet (lihat menu Kelola Outlet) untuk spesifik outlet · Untuk <b>MENGUBAH</b> produk yang sudah ada (termasuk pindah merchant), <b>export dulu</b> produknya supaya dapat kolom <code>id</code> yang benar, jangan hanya mengandalkan sku/nama.
+    </div>
     <div className="excel-card" style={{ padding: 20, border: "1px dashed #e5e7eb", borderRadius: 12, margin: "12px 0" }}>
       <label className="primary-btn" data-testid="bulk-import-file-label" style={{ display: "inline-flex" }}>
         <Upload size={14}/> Pilih File
@@ -1609,21 +1659,21 @@ function BulkImportModal({ merchants, onClose, onDone }) {
       {fileName && <span style={{ marginLeft: 12, color: "#6b7280", fontSize: 13 }}>{fileName} · <b>{rows.length}</b> baris valid{errors.length ? ` · ${errors.length} error` : ""}</span>}
     </div>
     {rows.length > 0 && <div className="data-table" style={{ maxHeight: 260, overflowY: "auto" }} data-testid="bulk-import-preview">
-      <div className="table-row table-label"><span>Nama</span><span>SKU</span><span>Kategori</span><span>Harga</span><span>HPP</span><span>Stok</span><span>Status</span></div>
+      <div className="table-row table-label"><span>Nama</span><span>SKU</span><span>Merchant</span><span>Outlet</span><span>Harga</span><span>Varian</span><span>Status</span></div>
       {rows.slice(0, 20).map((r, i) => <div className="table-row" key={i}>
         <span><b>{r.name}</b></span>
         <span><small>{r.sku || "—"}</small></span>
-        <span>{r.category}</span>
+        <span><small>{r.merchant_name || r.merchant_id || "—"}</small></span>
+        <span><small>{r.outlet_id === "" ? "🌐 semua" : r.outlet_id}</small></span>
         <span>{money(r.price)}</span>
-        <span>{money(r.cost)}</span>
-        <span>{r.stock}</span>
+        <span><small>{r.varian || "—"}</small></span>
         <span><span className="method-badge" style={{ background: r.is_active ? "#dcfce7" : "#fee2e2", color: r.is_active ? "#166534" : "#991b1b" }}>{r.is_active ? "Aktif" : "Nonaktif"}</span></span>
       </div>)}
       {rows.length > 20 && <div className="empty-hint">…dan {rows.length - 20} baris lainnya</div>}
     </div>}
     {errors.length > 0 && <div className="empty-hint" data-testid="bulk-import-errors" style={{ background: "#fef2f2", color: "#991b1b" }}>
       <b>{errors.length} error terdeteksi:</b>
-      <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>{errors.slice(0, 5).map((er, i) => <li key={i}>Baris {er.row}: {er.error}</li>)}</ul>
+      <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>{errors.slice(0, 8).map((er, i) => <li key={i}>Baris {er.row}: {er.error}</li>)}</ul>
     </div>}
     <div className="modal-actions">
       <button className="outline-btn" onClick={onClose}>Batal</button>

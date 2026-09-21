@@ -1701,12 +1701,47 @@ async def create_stock_movement(
 
 
 # ── Products Bulk Import (Excel/CSV parsed on the client, sent as JSON) ──────
+# Default placeholder for products without a real image URL.
+PRODUCT_IMAGE_PLACEHOLDER = ""  # empty means "no image" — frontend already renders <Coffee/> icon fallback
+
+
+def _parse_variants_string(raw: str) -> list[dict]:
+    """Parse 'Panas:18000|Ice:20000' → [{id,name,price,cost,active}, ...]. Silent-safe."""
+    if not raw or not isinstance(raw, str):
+        return []
+    out: list[dict] = []
+    for chunk in raw.split("|"):
+        piece = chunk.strip()
+        if not piece:
+            continue
+        if ":" in piece:
+            name, price_s = piece.split(":", 1)
+            try:
+                price = float(str(price_s).replace(",", ".").strip() or 0)
+            except ValueError:
+                price = 0.0
+        else:
+            name, price = piece, 0.0
+        name = name.strip()
+        if not name:
+            continue
+        out.append({
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "price": price,
+            "cost": 0.0,
+            "active": True,
+        })
+    return out
+
+
 class BulkProductRow(BaseModel):
     id: Optional[str] = None
     name: str
     category: str = "Lain-lain"
     vendor: str = "MJD Kupi"
     merchant_id: Optional[str] = None
+    merchant_name: Optional[str] = None  # alt for merchant_id — resolved server-side
     outlet_id: Optional[str] = None
     price: float = 0
     cost: float = 0
@@ -1714,11 +1749,18 @@ class BulkProductRow(BaseModel):
     sku: str = ""
     is_active: bool = True
     color: str = "#ffedd5"
+    image_url: Optional[str] = None
+    varian: Optional[str] = None  # "Panas:18000|Ice:20000"
+    status_aktif: Optional[int] = None  # 1/0 — takes precedence over is_active when provided
 
 
 class BulkProductInput(BaseModel):
     rows: List[BulkProductRow]
     mode: str = "upsert"  # upsert | insert
+    # Distinguishes "outlet_id key omitted entirely" from "outlet_id was explicitly cleared to global".
+    # When True, blank/None outlet_id ⇒ global product (NULL). When False (legacy behaviour), blank/None
+    # outlet_id falls back to user.outlet_id — kept for backwards compat with old frontends.
+    outlet_id_explicit: bool = True
 
 
 @api_router.post("/products/bulk-import")
@@ -1728,26 +1770,148 @@ async def bulk_import_products(
     user: M.User = Depends(require_roles("Super Admin", "Admin")),
 ):
     created, updated, errors = 0, 0, []
+
+    # Preload maps for merchant_name → id + valid outlet ids.
+    m_rows = await db.execute(select(M.Merchant.id, M.Merchant.name))
+    merchant_by_name: dict[str, str] = {}
+    valid_merchant_ids: set[str] = set()
+    for mid, mname in m_rows.all():
+        valid_merchant_ids.add(mid)
+        if mname:
+            merchant_by_name[str(mname).strip().lower()] = mid
+    o_rows = await db.execute(select(M.Outlet.id))
+    valid_outlet_ids: set[str] = {row[0] for row in o_rows.all()}
+
+    def _resolve_outlet(row) -> tuple[Optional[str], Optional[str]]:
+        """Return (outlet_id, error_or_none). None outlet_id means global (NULL)."""
+        raw = row.outlet_id
+        if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+            # Only Super Admin can create global products via bulk-import;
+            # Admins fall back to their own outlet.
+            if user.role == "Super Admin" and payload.outlet_id_explicit:
+                return None, None
+            return user.outlet_id, None
+        oid = str(raw).strip()
+        if oid not in valid_outlet_ids:
+            return None, f"outlet_id '{oid}' tidak ditemukan"
+        if user.role == "Admin" and oid != (user.outlet_id or ""):
+            return None, f"Admin hanya boleh import ke outletnya sendiri ({user.outlet_id})"
+        return oid, None
+
+    # ── Pass 1 — resolve merchant_name AND detect duplicates within the same upload.
+    # A duplicate is only flagged for rows that DON'T have an `id` (id rows are explicit
+    # single-target updates and should be allowed to appear multiple times if the user really
+    # wants to touch that same product twice — first write wins on the DB side anyway).
+    resolved_rows: list[tuple[int, BulkProductRow, Optional[str]]] = []  # (row_index_display, row, resolved_outlet_or_None)
+    dup_seen_sku: dict[tuple[str, Optional[str], str], int] = {}
+    dup_seen_name: dict[tuple[str, Optional[str], str], int] = {}
+    skip_indices: set[int] = set()
+
     for i, row in enumerate(payload.rows):
-        if not row.name:
-            errors.append({"row": i + 1, "error": "Nama produk kosong"})
+        display_row = i + 1
+        if not row.name or not str(row.name).strip():
+            errors.append({"row": display_row, "error": "Nama produk kosong"})
+            skip_indices.add(i)
             continue
-        target_outlet = row.outlet_id or user.outlet_id or "outlet-sudirman"
-        if user.role == "Admin" and target_outlet != (user.outlet_id or "outlet-sudirman"):
-            target_outlet = user.outlet_id or "outlet-sudirman"
-        # Match order: id > sku(+outlet) > name(+outlet)
+
+        # 1a. Resolve merchant_name → merchant_id (if merchant_id not already provided).
+        if not row.merchant_id and row.merchant_name:
+            resolved = merchant_by_name.get(str(row.merchant_name).strip().lower())
+            if resolved:
+                row.merchant_id = resolved
+            else:
+                errors.append({"row": display_row, "error": f"Merchant '{row.merchant_name}' tidak ditemukan"})
+                skip_indices.add(i)
+                continue
+
+        # 1b. For rows without id, merchant_id is mandatory (used in matching key to
+        # avoid cross-merchant SKU/name collisions). Rows with id can update ANY product
+        # (including moving to another merchant) — that's the safe pattern.
+        if not row.id and not row.merchant_id:
+            errors.append({"row": display_row, "error": "merchant_id/merchant_name wajib diisi untuk baris tanpa id"})
+            skip_indices.add(i)
+            continue
+
+        if row.merchant_id and row.merchant_id not in valid_merchant_ids:
+            errors.append({"row": display_row, "error": f"merchant_id '{row.merchant_id}' tidak ditemukan"})
+            skip_indices.add(i)
+            continue
+
+        # 1c. Resolve outlet (validates existence + admin scoping).
+        outlet_target, out_err = _resolve_outlet(row)
+        if out_err:
+            errors.append({"row": display_row, "error": out_err})
+            skip_indices.add(i)
+            continue
+
+        # 1d. In-file duplicate detection for rows without an id.
+        if not row.id:
+            merch = row.merchant_id or ""
+            if row.sku:
+                key_sku = (str(row.sku).strip().lower(), outlet_target, merch)
+                prev = dup_seen_sku.get(key_sku)
+                if prev is not None:
+                    errors.append({"row": display_row, "error": f"Duplikat baris {display_row} dengan baris {prev} dalam file yang sama (SKU sama, outlet sama, merchant sama) — gabungkan jadi 1 baris atau hapus salah satu."})
+                    skip_indices.add(i)
+                    continue
+                dup_seen_sku[key_sku] = display_row
+            key_name = (str(row.name).strip().lower(), outlet_target, merch)
+            prev = dup_seen_name.get(key_name)
+            if prev is not None:
+                errors.append({"row": display_row, "error": f"Duplikat baris {display_row} dengan baris {prev} dalam file yang sama (nama sama, outlet sama, merchant sama) — gabungkan jadi 1 baris atau hapus salah satu."})
+                skip_indices.add(i)
+                continue
+            dup_seen_name[key_name] = display_row
+
+        resolved_rows.append((display_row, row, outlet_target))
+
+    # ── Pass 2 — actual upsert (matching order: id → sku+outlet+merchant → name+outlet+merchant).
+    for display_row, row, target_outlet in resolved_rows:
         existing = None
         if row.id:
             existing = (await db.execute(select(M.Product).where(M.Product.id == row.id))).scalar_one_or_none()
-        if not existing and payload.mode == "upsert" and row.sku:
-            existing = (await db.execute(
-                select(M.Product).where(M.Product.sku == row.sku, M.Product.outlet_id == target_outlet)
-            )).scalar_one_or_none()
-        if not existing and payload.mode == "upsert":
-            existing = (await db.execute(
-                select(M.Product).where(M.Product.name == row.name, M.Product.outlet_id == target_outlet)
-            )).scalar_one_or_none()
+        if not existing and payload.mode == "upsert" and row.sku and row.merchant_id:
+            q = select(M.Product).where(
+                M.Product.sku == row.sku,
+                M.Product.merchant_id == row.merchant_id,
+            )
+            if target_outlet is None:
+                q = q.where(M.Product.outlet_id.is_(None))
+            else:
+                q = q.where(M.Product.outlet_id == target_outlet)
+            existing = (await db.execute(q)).scalar_one_or_none()
+        if not existing and payload.mode == "upsert" and row.merchant_id:
+            q = select(M.Product).where(
+                M.Product.name == row.name,
+                M.Product.merchant_id == row.merchant_id,
+            )
+            if target_outlet is None:
+                q = q.where(M.Product.outlet_id.is_(None))
+            else:
+                q = q.where(M.Product.outlet_id == target_outlet)
+            existing = (await db.execute(q)).scalar_one_or_none()
+
+        # Compute final is_active — status_aktif (1/0) takes precedence when supplied.
+        if row.status_aktif is not None:
+            active_final = bool(int(row.status_aktif))
+        else:
+            active_final = bool(row.is_active)
+
+        variants_final = _parse_variants_string(row.varian) if row.varian else None
+
+        # image_url handling
+        img_final: Optional[str] = None
+        if row.image_url is not None:
+            iu = str(row.image_url).strip()
+            if iu.lower().startswith(("http://", "https://", "data:")):
+                img_final = iu
+            elif iu == "":
+                img_final = PRODUCT_IMAGE_PLACEHOLDER
+            else:
+                img_final = PRODUCT_IMAGE_PLACEHOLDER  # invalid → placeholder
+
         if existing:
+            existing.name = row.name  # allow rename via re-import when id matches
             existing.category = row.category or existing.category
             existing.vendor = row.vendor or existing.vendor
             existing.price = float(row.price)
@@ -1755,11 +1919,18 @@ async def bulk_import_products(
             existing.stock = int(row.stock)
             if row.sku:
                 existing.sku = row.sku
-            existing.is_active = bool(row.is_active)
+            existing.is_active = active_final
             if row.merchant_id:
                 existing.merchant_id = row.merchant_id
             if row.color:
                 existing.color = row.color
+            if img_final is not None:
+                existing.image_url = img_final
+            if variants_final is not None:
+                existing.variants = variants_final
+            # Outlet update — only for id-matched rows so we don't silently move products.
+            if row.id and target_outlet != existing.outlet_id:
+                existing.outlet_id = target_outlet  # None ⇒ global
             updated += 1
         else:
             db.add(M.Product(
@@ -1773,14 +1944,133 @@ async def bulk_import_products(
                 cost=float(row.cost),
                 stock=int(row.stock),
                 sku=row.sku or "",
-                is_active=bool(row.is_active),
+                is_active=active_final,
                 color=row.color or "#ffedd5",
+                image_url=img_final if img_final is not None else PRODUCT_IMAGE_PLACEHOLDER,
                 modifiers=[],
-                variants=[],
+                variants=variants_final if variants_final is not None else [],
             ))
             created += 1
     await db.commit()
     return {"created": created, "updated": updated, "errors": errors, "total": len(payload.rows)}
+
+
+# ── Products CSV Template & Export (server-authoritative) ────────────────────
+CSV_HEADER = [
+    "id",
+    "nama_produk",
+    "sku",
+    "merchant_name",
+    "kategori",
+    "harga_jual",
+    "hpp_modal",
+    "stok_awal",
+    "outlet_id",
+    "image_url",
+    "varian",
+    "status_aktif",
+]
+
+
+def _csv_line(cells: list) -> str:
+    """Quote+escape a CSV row per RFC 4180."""
+    def esc(v):
+        if v is None:
+            return ""
+        s = str(v)
+        if any(ch in s for ch in [',', '"', '\n', '\r']):
+            return '"' + s.replace('"', '""') + '"'
+        return s
+    return ",".join(esc(c) for c in cells)
+
+
+@api_router.get("/products/csv-template")
+async def download_csv_template(
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
+):
+    """Return an empty template with 3 example rows illustrating new/edit/global patterns."""
+    # Pick a real merchant name for realism (fallback to placeholder).
+    r = await db.execute(select(M.Merchant.name).limit(2))
+    names = [n for (n,) in r.all() if n]
+    m1 = names[0] if names else "Barista Kopi"
+    m2 = names[1] if len(names) > 1 else m1
+    rows = [CSV_HEADER]
+    # (a) Produk baru, global (id kosong, outlet_id kosong)
+    rows.append(["", "Es Teh Manis Global", "TEH-GLOBAL-01", m1, "Non-Kopi", "10000", "3000", "50", "", "", "", "1"])
+    # (b) Produk baru, spesifik outlet
+    rows.append(["", "Kopi Susu Pandan", "KOPI-PANDAN-01", m1, "Kopi", "22000", "9000", "40", "outlet-sudirman", "", "Panas:22000|Ice:24000", "1"])
+    # (c) Baris dengan id terisi — MENGUBAH produk existing (termasuk pindah merchant)
+    rows.append(["<isi-id-hasil-export>", "Kopi Susu Pandan", "KOPI-PANDAN-01", m2, "Kopi", "25000", "10000", "40", "outlet-sudirman", "", "", "1"])
+    body = "\uFEFF" + "\n".join(_csv_line(r) for r in rows) + "\n"
+    filename = "template_produk.csv"
+    from fastapi.responses import Response as _R
+    return _R(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.get("/products/export")
+async def export_products(
+    outlet_id: Optional[str] = None,
+    merchant_id: Optional[str] = None,
+    category: Optional[str] = None,
+    status: Optional[str] = None,  # "active" | "inactive" | None
+    db: AsyncSession = Depends(get_db),
+    user: M.User = Depends(require_roles("Super Admin", "Admin")),
+):
+    stmt = select(M.Product).order_by(M.Product.name)
+    if merchant_id and merchant_id != "all":
+        stmt = stmt.where(M.Product.merchant_id == merchant_id)
+    if category and category != "all":
+        stmt = stmt.where(M.Product.category == category)
+    if status == "active":
+        stmt = stmt.where(M.Product.is_active == True)  # noqa: E712
+    elif status == "inactive":
+        stmt = stmt.where(M.Product.is_active == False)  # noqa: E712
+    # Outlet filter: include global (NULL) products in the results when filter matches.
+    if user.role == "Admin":
+        # Admin restricted to own outlet + globals
+        target = user.outlet_id
+        stmt = stmt.where((M.Product.outlet_id == target) | (M.Product.outlet_id.is_(None)))
+    elif outlet_id and outlet_id != "all":
+        stmt = stmt.where((M.Product.outlet_id == outlet_id) | (M.Product.outlet_id.is_(None)))
+    products = (await db.execute(stmt)).scalars().all()
+    # Merchant id → name map for readable export
+    m_rows = await db.execute(select(M.Merchant.id, M.Merchant.name))
+    m_name_by_id = {mid: mname for mid, mname in m_rows.all()}
+    lines = [_csv_line(CSV_HEADER)]
+    for p in products:
+        variants_str = "|".join(
+            f"{(v.get('name') or '').strip()}:{int(v.get('price') or 0)}"
+            for v in (p.variants or [])
+            if (v.get('name') or '').strip()
+        )
+        lines.append(_csv_line([
+            p.id or "",
+            p.name or "",
+            p.sku or "",
+            m_name_by_id.get(p.merchant_id) or "",
+            p.category or "",
+            int(p.price or 0),
+            int(p.cost or 0),
+            int(p.stock or 0),
+            p.outlet_id or "",  # NULL/global → empty string
+            p.image_url or "",
+            variants_str,
+            1 if p.is_active is not False else 0,
+        ]))
+    body = "\uFEFF" + "\n".join(lines) + "\n"
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    filename = f"export_produk_{date_str}.csv"
+    from fastapi.responses import Response as _R
+    return _R(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Settlement / Payout Center (per-merchant breakdown + ledger) ─────────────
