@@ -3639,13 +3639,6 @@ function Login({ onLogin }) {
       <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="Masukkan password" autoComplete="current-password" data-testid="login-password-input" /></label>
       {error && <div className="login-error" data-testid="login-error">{error}</div>}
       <button className="primary-btn full" disabled={busy} data-testid="login-submit-button">{busy ? "Memeriksa…" : `Masuk ke ${brand.name}`}<span>→</span></button>
-      <div className="demo-accounts" data-testid="demo-accounts">
-        <b>Akses demo cepat:</b>
-        <button type="button" onClick={() => { setEmail("superadmin"); setPassword(".Superadmin1_"); setError(""); }} data-testid="demo-superadmin-button">Super Admin</button>
-        <button type="button" onClick={() => { setEmail("admin"); setPassword("MjdKupi#2026"); setError(""); }} data-testid="demo-admin-button">Admin</button>
-        <button type="button" onClick={() => { setEmail("kasir"); setPassword("MjdKupi#2026"); setError(""); }} data-testid="demo-kasir-button">Kasir</button>
-        <button type="button" onClick={() => { setEmail("vendor"); setPassword("MjdKupi#2026"); setError(""); }} data-testid="demo-vendor-button">Vendor</button>
-      </div>
     </form>
   </div>;
 }

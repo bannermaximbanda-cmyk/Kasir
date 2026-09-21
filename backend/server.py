@@ -207,13 +207,11 @@ class KdsStatusInput(BaseModel):
 # -----------------------------------------------------------------------------
 
 ROLES = ["Super Admin", "Admin", "Vendor", "Kasir"]
-DEMO_USERS = [
-    # (email, username, password, role, name)
-    ("superadmin@mjd-kupi.local", "superadmin", ".Superadmin1_", "Super Admin", "Raka Owner"),
-    ("manager@mjd-kupi.local", "admin", "MjdKupi#2026", "Admin", "Maya Ardianti"),
-    ("vendor@mjd-kupi.local", "vendor", "MjdKupi#2026", "Vendor", "Agus Tenant"),
-    ("kasir@mjd-kupi.local", "kasir", "MjdKupi#2026", "Kasir", "Dina Kasir"),
-]
+# NOTE (Feb 2026): Automatic user/merchant/product/outlet/expense seeding on startup
+# was intentionally removed on production request. This app MUST NOT create any data
+# in the production database at boot. Provision users/merchants/outlets/products
+# manually via the admin UI. If tests need fixture data, use a separate staging DB
+# or prefix records with "TEST_" and delete them before hand-off.
 
 
 def public_user(user: M.User) -> dict:
@@ -2787,24 +2785,12 @@ async def branding_current(db: AsyncSession = Depends(get_db), user: M.User = De
 
 
 # -----------------------------------------------------------------------------
-# Startup: create tables + seed demo data
 # -----------------------------------------------------------------------------
-
-DEMO_MERCHANTS = [
-    ("m-barista", "Barista Kopi", "Kopi", 10.0, "62811100001", "#fff0e6"),
-    ("m-nasi-uduk", "Nasi Uduk Bang Agus", "Makanan", 15.0, "62811100002", "#fff8dc"),
-    ("m-sate", "Sate Madura Pak Kumis", "Makanan", 15.0, "62811100003", "#fee2e2"),
-    ("m-bakery", "MJD Bakery", "Snack", 12.0, "62811100004", "#fff2c6"),
-]
-
-DEMO_PRODUCTS = [
-    ("p-1", "Kopi Susu Gula Aren", "Kopi", "m-barista", 18000, 6500, 42, "#fff0e6"),
-    ("p-2", "Americano Ice", "Kopi", "m-barista", 15000, 4500, 28, "#f6eadf"),
-    ("p-3", "Nasi Uduk Ayam", "Makanan", "m-nasi-uduk", 24000, 11500, 18, "#fff8dc"),
-    ("p-4", "Sate Madura 10 Tusuk", "Makanan", "m-sate", 30000, 15000, 12, "#fee2e2"),
-    ("p-5", "Croffle Butter", "Snack", "m-bakery", 16000, 6000, 24, "#fff2c6"),
-    ("p-6", "Matcha Latte", "Non-Kopi", "m-barista", 22000, 8000, 9, "#e6f4e7"),
-]
+# Startup: create tables + apply idempotent schema migrations.
+# NOTE: DEMO data seeding (users/merchants/products/outlets/expenses) was
+# intentionally removed on Feb 2026 by production owner directive. The startup
+# routine now ONLY runs schema DDL — it MUST NEVER insert business rows.
+# -----------------------------------------------------------------------------
 
 
 @app.on_event("startup")
@@ -2860,89 +2846,11 @@ async def bootstrap():
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_fixed FLOAT DEFAULT 0",
             "UPDATE mjd_self_orders SET status='Pesanan Diterima' WHERE status='Menunggu kasir'",
             "UPDATE mjd_users SET role='Admin' WHERE role='Merchant Admin'",
-            "UPDATE mjd_users SET merchant_id='m-barista' WHERE role='Vendor' AND (merchant_id IS NULL OR merchant_id='')",
         ):
             await conn.execute(text(stmt))
-
-    async with AsyncSessionLocal() as db:
-        # Seed outlets
-        count = (await db.execute(select(func.count(M.Outlet.id)))).scalar_one()
-        if count == 0:
-            db.add_all([
-                M.Outlet(id="outlet-sudirman", name="Outlet Sudirman", address="Jl. Sudirman No. 10", active=True),
-                M.Outlet(id="outlet-kemang", name="Outlet Kemang", address="Jl. Kemang Raya No. 3", active=True),
-            ])
-            await db.commit()
-
-        # Seed users (with username & plain_password)
-        for email, username, password, role, name in DEMO_USERS:
-            result = await db.execute(select(M.User).where(M.User.email == email))
-            existing = result.scalar_one_or_none()
-            if not existing:
-                db.add(M.User(
-                    email=email,
-                    username=username,
-                    password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
-                    plain_password=password,
-                    role=role,
-                    name=name,
-                    active=True,
-                ))
-            else:
-                # Backfill username/plain_password for existing users
-                changed = False
-                if not existing.username:
-                    existing.username = username; changed = True
-                if not existing.plain_password:
-                    existing.plain_password = password; changed = True
-                # Force reset password_hash if corrupt (invalid bcrypt salt from earlier env-expansion bug)
-                # OR rotate super admin to new spec.
-                needs_rotate = False
-                try:
-                    if username == "superadmin" and not bcrypt.checkpw(password.encode(), existing.password_hash.encode()):
-                        needs_rotate = True
-                    # Additionally: validate hash format
-                    if not existing.password_hash or not existing.password_hash.startswith("$2"):
-                        needs_rotate = True
-                except (ValueError, Exception):
-                    needs_rotate = True
-                if needs_rotate:
-                    existing.password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-                    existing.plain_password = password
-                    changed = True
-                if changed:
-                    pass
-        await db.commit()
-
-        # Seed merchants
-        count = (await db.execute(select(func.count(M.Merchant.id)))).scalar_one()
-        if count == 0:
-            for mid, name, cat, comm, phone, color in DEMO_MERCHANTS:
-                db.add(M.Merchant(
-                    id=mid, name=name, category=cat, commission_percent=comm, phone=phone, color=color,
-                ))
-            await db.commit()
-
-        # Seed products
-        count = (await db.execute(select(func.count(M.Product.id)))).scalar_one()
-        if count == 0:
-            for pid, name, cat, mid, price, cost, stock, color in DEMO_PRODUCTS:
-                # Lookup vendor name from seeded merchants
-                vendor_name = next((n for _mid, n, *_ in DEMO_MERCHANTS if _mid == mid), "MJD Kupi")
-                db.add(M.Product(
-                    id=pid, name=name, category=cat, merchant_id=mid, vendor=vendor_name,
-                    price=price, cost=cost, stock=stock, color=color, modifiers=[],
-                ))
-            await db.commit()
-
-        # Seed default expenses if empty
-        count = (await db.execute(select(func.count(M.Expense.id)))).scalar_one()
-        if count == 0:
-            db.add_all([
-                M.Expense(category="Pembelian Bahan Baku", note="Restock susu & biji kopi", amount=1250000, date="2026-02-12", method="Transfer"),
-                M.Expense(category="Listrik & Air", note="Tagihan bulan berjalan", amount=850000, date="2026-02-10", method="Transfer"),
-            ])
-            await db.commit()
+    # No data-seeding here by design. Owner/Super Admin bootstraps the first user
+    # manually (via psql / Supabase SQL editor); everything else is created through
+    # the admin UI at runtime.
 
 
 @app.on_event("shutdown")
