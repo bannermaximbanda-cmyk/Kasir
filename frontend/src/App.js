@@ -390,7 +390,7 @@ function AdminApp() {
         <div className="page-wrap">
           {page === "overview" && <Overview products={products} expenses={expenses} setPage={setPage} activeOutlet={activeOutlet} />}
           {page === "pos" && (
-            <POS products={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory}
+            <POS products={filtered} merchants={merchants} query={query} setQuery={setQuery} category={category} setCategory={setCategory}
                  cart={cart} addToCart={addToCart} adjustCart={adjustCart} subtotal={subtotal} tax={tax} total={total} taxConfig={taxConfig}
                  onPay={openPayment} shift={shift} role={session.role}
                  onlineOrders={onlineOrders} openOnline={() => setShowOnlineOrders(true)}
@@ -642,10 +642,26 @@ function PaginationBar({ page, setPage, totalPages, start, end, total, label = "
 }
 
 // -------- POS --------
-function POS({ products, query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, taxConfig, onPay, shift, role, onlineOrders, openOnline, openHistory }) {
+function POS({ products, merchants = [], query, setQuery, category, setCategory, cart, addToCart, adjustCart, subtotal, tax, total, taxConfig, onPay, shift, role, onlineOrders, openOnline, openHistory }) {
   const locked = role === "Kasir" && !shift;
   const [variantPick, setVariantPick] = useState(null); // { product }
-  const pg = usePagination(products, [query, category, products.length]);
+  // Segmented filter mode: "category" (default) | "merchant"
+  const [filterMode, setFilterMode] = useState("category");
+  const [merchantFilter, setMerchantFilter] = useState("all"); // "all" | merchant.id
+  // When user toggles mode, reset the inner tab selection so we don't leak stale state across modes.
+  const switchMode = (next) => {
+    if (next === filterMode) return;
+    setFilterMode(next);
+    if (next === "merchant") { setCategory("Semua"); setMerchantFilter("all"); }
+    else { setMerchantFilter("all"); setCategory("Semua"); }
+  };
+  // Apply the merchant-mode filter on top of the products already filtered by parent (query + category).
+  const displayProducts = useMemo(() => (
+    filterMode === "merchant" && merchantFilter !== "all"
+      ? products.filter((p) => p.merchant_id === merchantFilter)
+      : products
+  ), [products, filterMode, merchantFilter]);
+  const pg = usePagination(displayProducts, [query, category, filterMode, merchantFilter, displayProducts.length]);
   const handleProductClick = (p) => {
     const active = (p.variants || []).filter((v) => v.active !== false);
     if (active.length > 0) setVariantPick(p);
@@ -667,7 +683,16 @@ function POS({ products, query, setQuery, category, setCategory, cart, addToCart
       <section className="menu-area">
         <div className="menu-tools">
           <div className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cari menu atau scan barcode..." disabled={locked} data-testid="pos-product-search" /></div>
-          <div className="category-tabs">{["Semua", "Kopi", "Makanan", "Snack", "Non-Kopi"].map((c) => <button className={category === c ? "selected" : ""} key={c} onClick={() => setCategory(c)} disabled={locked} data-testid={`category-${c.toLowerCase()}`}>{c}</button>)}</div>
+          <div className="filter-mode-switch" role="tablist" aria-label="Mode filter" data-testid="pos-filter-mode-switch" style={{ display: "inline-flex", background: "#fef3c7", padding: 3, borderRadius: 999, gap: 2, marginRight: 10, alignSelf: "center" }}>
+            <button type="button" role="tab" aria-selected={filterMode === "category"} onClick={() => switchMode("category")} disabled={locked} data-testid="pos-filter-mode-category" style={{ padding: "5px 12px", borderRadius: 999, border: 0, fontSize: 12, fontWeight: 700, cursor: locked ? "not-allowed" : "pointer", background: filterMode === "category" ? "#f97316" : "transparent", color: filterMode === "category" ? "#ffffff" : "#9a3412" }}>Kategori</button>
+            <button type="button" role="tab" aria-selected={filterMode === "merchant"} onClick={() => switchMode("merchant")} disabled={locked} data-testid="pos-filter-mode-merchant" style={{ padding: "5px 12px", borderRadius: 999, border: 0, fontSize: 12, fontWeight: 700, cursor: locked ? "not-allowed" : "pointer", background: filterMode === "merchant" ? "#f97316" : "transparent", color: filterMode === "merchant" ? "#ffffff" : "#9a3412" }}>🏪 Per Merchant</button>
+          </div>
+          {filterMode === "category"
+            ? <div className="category-tabs" data-testid="pos-category-tabs">{["Semua", "Kopi", "Makanan", "Snack", "Non-Kopi"].map((c) => <button className={category === c ? "selected" : ""} key={c} onClick={() => setCategory(c)} disabled={locked} data-testid={`category-${c.toLowerCase()}`}>{c}</button>)}</div>
+            : <div className="category-tabs" data-testid="pos-merchant-tabs">
+                <button className={merchantFilter === "all" ? "selected" : ""} onClick={() => setMerchantFilter("all")} disabled={locked} data-testid="merchant-tab-all">Semua Merchant</button>
+                {merchants.map((m) => <button className={merchantFilter === m.id ? "selected" : ""} key={m.id} onClick={() => setMerchantFilter(m.id)} disabled={locked} data-testid={`merchant-tab-${m.id}`}>{m.name}</button>)}
+              </div>}
         </div>
         <div className="menu-scroll" data-testid="pos-menu-scroll">
           <div className="product-grid" data-testid="pos-product-grid">
@@ -3343,10 +3368,23 @@ function CustomerSelfOrder() {
     }
   };
 
-  // Categories
+  // Categories + segmented filter mode (separate state from POS component)
   const cats = ["Semua", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean)))];
-  const filtered = products.filter((p) => (category === "Semua" || p.category === category) && (!query || p.name.toLowerCase().includes(query.toLowerCase())));
-  const pg = usePagination(filtered, [query, category, filtered.length], 12);
+  const [csaFilterMode, setCsaFilterMode] = useState("category"); // "category" | "merchant"
+  const [csaMerchantFilter, setCsaMerchantFilter] = useState("all");
+  const switchCsaMode = (next) => {
+    if (next === csaFilterMode) return;
+    setCsaFilterMode(next);
+    if (next === "merchant") { setCategory("Semua"); setCsaMerchantFilter("all"); }
+    else { setCsaMerchantFilter("all"); setCategory("Semua"); }
+  };
+  const filtered = products.filter((p) => {
+    if (csaFilterMode === "category" && category !== "Semua" && p.category !== category) return false;
+    if (csaFilterMode === "merchant" && csaMerchantFilter !== "all" && p.merchant_id !== csaMerchantFilter) return false;
+    if (query && !p.name.toLowerCase().includes(query.toLowerCase())) return false;
+    return true;
+  });
+  const pg = usePagination(filtered, [query, category, csaFilterMode, csaMerchantFilter, filtered.length], 12);
   const itemCount = cart.reduce((a, i) => a + i.qty, 0);
   const activeOutletName = availableOutlets.find((o) => o.id === outletId)?.name || outletId;
 
@@ -3427,8 +3465,17 @@ function CustomerSelfOrder() {
         <Search size={16}/>
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cari menu favoritmu…" data-testid="csa-search-input"/>
       </div>
-      <div className="csa-cats">
-        {cats.map((c) => <button key={c} className={category === c ? "active" : ""} onClick={() => setCategory(c)} data-testid={`csa-cat-${c.toLowerCase()}`}>{c}</button>)}
+      <div className="csa-filter-mode-switch" role="tablist" aria-label="Mode filter" data-testid="csa-filter-mode-switch" style={{ display: "inline-flex", background: "#fef3c7", padding: 3, borderRadius: 999, gap: 2, margin: "0 0 6px 0", alignSelf: "flex-start" }}>
+        <button type="button" role="tab" aria-selected={csaFilterMode === "category"} onClick={() => switchCsaMode("category")} data-testid="csa-filter-mode-category" style={{ padding: "5px 12px", borderRadius: 999, border: 0, fontSize: 12, fontWeight: 700, cursor: "pointer", background: csaFilterMode === "category" ? "#f97316" : "transparent", color: csaFilterMode === "category" ? "#ffffff" : "#9a3412" }}>Kategori</button>
+        <button type="button" role="tab" aria-selected={csaFilterMode === "merchant"} onClick={() => switchCsaMode("merchant")} data-testid="csa-filter-mode-merchant" style={{ padding: "5px 12px", borderRadius: 999, border: 0, fontSize: 12, fontWeight: 700, cursor: "pointer", background: csaFilterMode === "merchant" ? "#f97316" : "transparent", color: csaFilterMode === "merchant" ? "#ffffff" : "#9a3412" }}>🏪 Per Merchant</button>
+      </div>
+      <div className="csa-cats" data-testid={csaFilterMode === "category" ? "csa-cats-category" : "csa-cats-merchant"}>
+        {csaFilterMode === "category"
+          ? cats.map((c) => <button key={c} className={category === c ? "active" : ""} onClick={() => setCategory(c)} data-testid={`csa-cat-${c.toLowerCase()}`}>{c}</button>)
+          : (<>
+              <button className={csaMerchantFilter === "all" ? "active" : ""} onClick={() => setCsaMerchantFilter("all")} data-testid="csa-merchant-all">Semua Merchant</button>
+              {merchants.map((m) => <button key={m.id} className={csaMerchantFilter === m.id ? "active" : ""} onClick={() => setCsaMerchantFilter(m.id)} data-testid={`csa-merchant-${m.id}`}>{m.name}</button>)}
+            </>)}
       </div>
     </div>
     {/* Product list */}
