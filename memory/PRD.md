@@ -379,6 +379,42 @@ See `/app/memory/test_credentials.md`.
 
 **Task 7 note**: No Supabase Storage helper exists in codebase — every image field (logo, QRIS, product image, banner) currently uses base64 data URLs via `FileReader.readAsDataURL`. Keeping existing pattern for iter30; adding Storage bucket integration would be a separate iteration.
 
+## Iteration 31 (Feb 2026 — Self-Order 2-Step Payment Verification)
+**Scope**: refactor `OnlineOrdersModal` UI flow + customer tracker label. Backend `accept_self_order` atomic idempotency **UNTOUCHED** per user spec.
+
+**Frontend** (`App.js`):
+- [x] **Payment status badge** di setiap online order:
+  - `QRIS`/`Transfer` + `payment_proof` filled → hijau **"SUDAH DIBAYAR"**
+  - `QRIS`/`Transfer` tanpa proof → kuning **"MENUNGGU VERIFIKASI"**
+  - `Cash` / kosong → netral **"TUNAI DI KASIR"**
+- [x] **"Lihat Bukti Bayar"** button → membuka lightbox full-screen dari `payment_proof` (klik backdrop / X untuk tutup).
+- [x] **2-step verification flow** menggantikan single-click accept:
+  - Klik "Terima & Kirim ke Dapur" → panel konfirmasi inline muncul dengan headline "Apakah pembayaran sebesar {money} sudah dikonfirmasi masuk ke rekening/EDC?" + sub-info metode + status bukti bayar.
+  - 3 aksi di panel: **Batal** (tutup panel), **Tolak / Batalkan Pesanan** (buka reject panel dengan alasan wajib), **Konfirmasi Pembayaran & Kirim ke KDS** (panggil `POST /self-order/{id}/accept`).
+- [x] **Reject flow** — replace `window.prompt` dengan inline textarea (`textarea data-testid=reject-reason-input-{id}`). Alasan wajib diisi sebelum tombol submit enable (frontend enforce).
+- [x] **Idempotency dipertahankan**: `useState processing[id]` + `hidden` Set masih di tempat. Backend atomic UPDATE...WHERE status IN tetap sebagai lini kedua pertahanan (return 409 untuk double-click).
+- [x] **Customer tracker label update**: step "Diproses" (dan alias transisi "processing") sekarang berlabel **"Pesanan Diverifikasi & Sedang Disiapkan"** — tanpa field/status baru di DB.
+
+**Backend**: TIDAK diubah. Verifikasi via test bahwa perilaku yang sudah ada tetap:
+- Queue endpoint (`GET /pos/online-orders`) sudah return `payment_method` + `payment_proof` via `to_dict(row)`.
+- `KitchenOrder` hanya dibuat DI DALAM `accept_self_order` setelah atomic UPDATE sukses (baris ~1508+) — verifikasi lewat test bahwa KDS kosong sebelum accept.
+- Reject setelah accept → 409 (state-machine kunci).
+
+**Verified via pytest** (`tests/test_iteration31_selforder_2step.py`, 6/6 pass):
+- `test_queue_returns_payment_fields` ✅ — payment_method + payment_proof di response
+- `test_no_kds_ticket_before_accept` ✅ — pending order tidak leak ke KDS
+- `test_accept_creates_kds_and_sets_processing` ✅ — accept → KDS ticket + status Diproses/processing
+- `test_accept_is_atomic_second_call_returns_409` ✅ — 2nd accept dedupped via atomic guard
+- `test_reject_records_reason` ✅ — reject dengan reason sukses, 2nd reject 409
+- `test_reject_after_accept_is_blocked` ✅ — state-machine kunci
+
+**Verified via screenshot** (Playwright):
+- Panel default: header + badge "SUDAH DIBAYAR" hijau + tombol Lihat Bukti Bayar
+- Panel konfirmasi 2-step muncul di atas item dengan 3 aksi
+- Lightbox bukti bayar buka gambar full-screen
+
+**Housekeeping**: 82 test rows (kitchen_orders + self_orders TEST-prefix) dan demo order screenshot dibersihkan.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).

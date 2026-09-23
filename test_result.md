@@ -103,7 +103,100 @@
 #====================================================================================================
 
 user_problem_statement: |
-  Iter30 Bulk-Import Hardening (complete existing endpoint, no refactor):
+  Iter31 — Self-order 2-step payment verification (no refactor of backend idempotency):
+  1. Frontend online-orders modal: show payment status badge + Lihat Bukti Bayar lightbox.
+  2. Accept button becomes 2-step: confirm-panel → Konfirmasi Pembayaran & Kirim ke KDS / Tolak.
+  3. Reject: inline textarea, alasan wajib (frontend enforce).
+  4. Customer tracker: label "Pesanan Diverifikasi & Sedang Disiapkan" for status Diproses/processing.
+
+backend:
+  - task: "Iter31 — verify existing atomic accept + queue payload"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: |
+          Backend accept_self_order() + queue endpoint UNCHANGED per user instruction (do not
+          refactor atomic idempotency). Verified via 6 new pytest tests that:
+            • /api/pos/online-orders returns payment_method + payment_proof
+            • KDS ticket NOT created before accept (pending state)
+            • Accept succeeds → SelfOrder.status = "Diproses", KDS ticket appears
+            • 2nd concurrent accept returns 409 (atomic guard intact)
+            • Reject records reason, subsequent reject returns 409
+            • Reject after accept returns 409 (state-machine locked)
+
+frontend:
+  - task: "Iter31 — 2-step payment verification in OnlineOrdersModal"
+    implemented: true
+    working: true
+    file: "frontend/src/App.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: |
+          OnlineOrdersModal rewritten with 2-step flow:
+            • Payment badge: "SUDAH DIBAYAR" (green) / "MENUNGGU VERIFIKASI" (yellow) / "TUNAI DI KASIR"
+            • "Lihat Bukti Bayar" opens full-screen lightbox (click backdrop to close)
+            • Accept click → inline confirm panel with "Apakah pembayaran sebesar Rp {total} sudah
+              dikonfirmasi..." + 3 actions (Batal / Tolak / Konfirmasi Pembayaran & Kirim ke KDS)
+            • Reject flow uses inline textarea with mandatory reason (frontend enforce)
+            • Idempotency guards retained: processing map + hidden Set + backend 409 fallback
+          Verified via Playwright screenshot: default panel, confirm panel, lightbox all render
+          correctly with seeded demo order.
+
+  - task: "Iter31 — Customer tracker label 'Pesanan Diverifikasi & Sedang Disiapkan'"
+    implemented: true
+    working: true
+    file: "frontend/src/App.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: |
+          CustomerSelfOrder tracker: `Diproses` step relabelled to
+          "Pesanan Diverifikasi & Sedang Disiapkan". Normalizes transient "processing" status
+          (during atomic accept window) to same step. No new DB field needed.
+
+metadata:
+  created_by: "main_agent"
+  version: "iter31"
+  test_sequence: 31
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Iter31 — verify existing atomic accept + queue payload"
+    - "Iter31 — 2-step payment verification in OnlineOrdersModal"
+    - "Iter31 — Customer tracker label 'Pesanan Diverifikasi & Sedang Disiapkan'"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: |
+      Iter31 complete. Backend intentionally untouched (atomic accept preserved).
+      New test file `tests/test_iteration31_selforder_2step.py` — 6/6 pass, all TEST_-prefixed
+      fixtures deleted afterwards per anti-seed rule (verified: 82 rows cleaned).
+      Frontend 2-step flow visually verified via Playwright — payment badge / lightbox /
+      confirm-panel / reject-panel all render properly.
+
+
+#====================================================================================================
+# Testing Data - Main Agent and testing sub agent both should log testing data below this section
+#====================================================================================================
+
+_previous_iter30_notes: |
   0. Fix cross-merchant collision: matching order id→sku+outlet+merchant→name+outlet+merchant.
   0b. In-file duplicate detection (same file, same sku/name+outlet+merchant, no id).
   1. BulkProductRow: add image_url, varian ("Name:price|Name:price"), status_aktif (1/0),

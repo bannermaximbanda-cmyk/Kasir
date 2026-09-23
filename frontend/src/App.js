@@ -3138,13 +3138,20 @@ function ShiftReportModal({ report, onClose, notify, outlets }) {
 function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
   const [processing, setProcessing] = useState({}); // {orderId: 'accepting' | 'rejecting'}
   const [hidden, setHidden] = useState(new Set());  // optimistic hidden IDs
+  // Iter31 — 2-step payment verification flow:
+  const [confirmingId, setConfirmingId] = useState(null);      // which order's inline confirm panel is expanded
+  const [rejectingId, setRejectingId] = useState(null);        // which order is showing the reject-reason form
+  const [rejectReason, setRejectReason] = useState("");
+  const [proofImg, setProofImg] = useState("");                // lightbox src
+
   const accept = async (id) => {
     if (processing[id] || hidden.has(id)) return; // idempotent guard
     setProcessing((p) => ({ ...p, [id]: "accepting" }));
-    setHidden((s) => new Set([...s, id])); // optimistic remove
+    setHidden((s) => new Set([...s, id]));         // optimistic remove
     try {
       await axios.post(`${API}/self-order/${id}/accept`);
-      notify("Pesanan diterima & masuk KDS");
+      notify("✅ Pembayaran dikonfirmasi & pesanan masuk KDS");
+      setConfirmingId(null);
       reload();
       onAcceptDone?.();
     } catch (e) {
@@ -3153,7 +3160,6 @@ function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
       if (status === 409) {
         notify("⚠️ Pesanan sudah diproses (double-click terblokir)");
       } else {
-        // rollback optimistic hide on real error (not 409 dupe)
         setHidden((s) => { const n = new Set(s); n.delete(id); return n; });
         notify(detail);
       }
@@ -3161,20 +3167,21 @@ function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
       setProcessing((p) => { const c = { ...p }; delete c[id]; return c; });
     }
   };
-  const reject = async (id) => {
+  const submitReject = async (id) => {
     if (processing[id] || hidden.has(id)) return;
-    const reason = window.prompt("Alasan penolakan (opsional):", "Stok habis");
-    if (reason === null) return;
+    const reason = rejectReason.trim();
+    if (!reason) { notify("Alasan penolakan wajib diisi"); return; }
     setProcessing((p) => ({ ...p, [id]: "rejecting" }));
     setHidden((s) => new Set([...s, id]));
     try {
       await axios.post(`${API}/self-order/${id}/reject`, { reason });
-      notify("Pesanan ditolak"); reload();
+      notify("Pesanan ditolak");
+      setRejectingId(null); setRejectReason(""); setConfirmingId(null);
+      reload();
     } catch (e) {
       const status = e.response?.status;
-      if (status === 409) {
-        notify("⚠️ Pesanan sudah diproses");
-      } else {
+      if (status === 409) notify("⚠️ Pesanan sudah diproses");
+      else {
         setHidden((s) => { const n = new Set(s); n.delete(id); return n; });
         notify(e.response?.data?.detail || "Gagal menolak");
       }
@@ -3182,16 +3189,31 @@ function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
       setProcessing((p) => { const c = { ...p }; delete c[id]; return c; });
     }
   };
+  const openConfirm = (id) => { setConfirmingId(id); setRejectingId(null); setRejectReason(""); };
+  const openReject = (id) => { setRejectingId(id); setRejectReason(""); };
+
+  // Payment badge builder — returns { label, bg, fg }. Cash-at-cashier renders neutral;
+  // QRIS/Transfer with proof = paid (green), without proof = pending verification (yellow).
+  const paymentBadge = (o) => {
+    const method = (o.payment_method || "").toLowerCase();
+    if (!method || method === "cash" || method === "tunai") return { label: "TUNAI DI KASIR", bg: "#f5f5f4", fg: "#57534e" };
+    if (o.payment_proof) return { label: "SUDAH DIBAYAR", bg: "#dcfce7", fg: "#166534" };
+    return { label: "MENUNGGU VERIFIKASI", bg: "#fef9c3", fg: "#854d0e" };
+  };
+
   const visible = orders.filter((o) => !hidden.has(o.id));
   return <div className="modal-backdrop">
     <div className="online-modal" data-testid="online-orders-modal">
       <button className="modal-close" onClick={onClose}><X size={18} /></button>
-      <div className="pay-head"><h2>Pesanan masuk (QR Meja)</h2><span>{visible.length} antrean · terima untuk lanjut ke dapur</span></div>
+      <div className="pay-head"><h2>Pesanan masuk (QR Meja)</h2><span>{visible.length} antrean · verifikasi pembayaran → lanjut ke dapur</span></div>
       <div className="online-list">
         {visible.length === 0 && <div className="empty-cart"><QrCode size={30} /><b>Belum ada pesanan online</b><span>Pesanan self-order akan muncul di sini secara realtime (polling 4s)</span></div>}
         {visible.map((o) => {
           const state = processing[o.id];
           const busy = Boolean(state);
+          const isConfirming = confirmingId === o.id;
+          const isRejecting = rejectingId === o.id;
+          const badge = paymentBadge(o);
           return <div className={`online-item ${busy ? "busy" : ""}`} key={o.id} data-testid={`online-item-${o.id}`}>
             <div className="online-item-head">
               <div>
@@ -3201,24 +3223,55 @@ function OnlineOrdersModal({ orders, onClose, reload, notify, onAcceptDone }) {
               </div>
               <strong>{money(o.total)}</strong>
             </div>
+            <div className="payment-meta" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", margin: "6px 0 8px" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "#78716c" }}>💳 {o.payment_method || "Cash"}</span>
+              <span data-testid={`payment-badge-${o.id}`} style={{ fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 999, background: badge.bg, color: badge.fg, letterSpacing: 0.4 }}>{badge.label}</span>
+              {o.payment_proof && <button type="button" className="small-action" onClick={() => setProofImg(o.payment_proof)} data-testid={`view-proof-${o.id}`}><FileText size={11}/> Lihat Bukti Bayar</button>}
+            </div>
             <ul className="online-lines">{(o.lines || []).map((ln, i) => <li key={i}>
               <b>{ln.quantity}×</b> {ln.name}{ln.variant_name && <em className="var-chip"> {ln.variant_name}</em>}
               {ln.notes && <small className="line-note"> · 📝 {ln.notes}</small>}
               <em>{money(ln.price * ln.quantity)}</em>
             </li>)}</ul>
-            {o.payment_proof && <div className="proof-thumb"><img src={o.payment_proof} alt="proof" /><small>Bukti pembayaran</small></div>}
-            <div className="online-actions">
-              <button className="danger-btn" onClick={() => reject(o.id)} disabled={busy} data-testid={`reject-online-${o.id}`}>
-                {state === "rejecting" ? <><RefreshCw size={13} className="spin"/> Memproses…</> : <><X size={13}/> Tolak Pesanan</>}
+            {!isConfirming && !isRejecting && <div className="online-actions">
+              <button className="danger-btn" onClick={() => openReject(o.id)} disabled={busy} data-testid={`reject-online-${o.id}`}>
+                <X size={13}/> Tolak Pesanan
               </button>
-              <button className="primary-btn" onClick={() => accept(o.id)} disabled={busy} data-testid={`accept-online-${o.id}`}>
-                {state === "accepting" ? <><RefreshCw size={14} className="spin"/> Memproses…</> : <><Check size={14}/> Terima & Kirim ke Dapur</>}
+              <button className="primary-btn" onClick={() => openConfirm(o.id)} disabled={busy} data-testid={`accept-online-${o.id}`}>
+                <Check size={14}/> Terima & Kirim ke Dapur
               </button>
-            </div>
+            </div>}
+            {isConfirming && !isRejecting && <div className="payment-confirm" data-testid={`confirm-panel-${o.id}`} style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, padding: 12, margin: "6px 0" }}>
+              <b style={{ fontSize: 13, color: "#9a3412" }}>Apakah pembayaran sebesar {money(o.total)} sudah dikonfirmasi masuk ke rekening/EDC?</b>
+              <p style={{ fontSize: 11, color: "#78716c", margin: "4px 0 10px" }}>Metode: <b>{o.payment_method || "Cash"}</b>{o.payment_proof ? " · bukti bayar terlampir" : " · belum ada bukti bayar"}. Pastikan verifikasi sebelum lanjut — pesanan akan dikirim ke dapur setelah dikonfirmasi.</p>
+              <div className="online-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="outline-btn" onClick={() => setConfirmingId(null)} disabled={busy} data-testid={`confirm-cancel-${o.id}`}>Batal</button>
+                <button className="danger-btn" onClick={() => openReject(o.id)} disabled={busy} data-testid={`confirm-reject-${o.id}`}><X size={13}/> Tolak / Batalkan Pesanan</button>
+                <button className="primary-btn" onClick={() => accept(o.id)} disabled={busy} data-testid={`confirm-accept-${o.id}`}>
+                  {state === "accepting" ? <><RefreshCw size={14} className="spin"/> Memproses…</> : <><Check size={14}/> Konfirmasi Pembayaran & Kirim ke KDS</>}
+                </button>
+              </div>
+            </div>}
+            {isRejecting && <div className="reject-panel" data-testid={`reject-panel-${o.id}`} style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: 12, margin: "6px 0" }}>
+              <b style={{ fontSize: 13, color: "#991b1b" }}>Alasan penolakan (wajib)</b>
+              <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} placeholder="Mis: Bahan baku habis / Sudah tutup / Pembayaran gagal" data-testid={`reject-reason-input-${o.id}`} style={{ display: "block", width: "100%", marginTop: 6, padding: 8, fontSize: 12, border: "1px solid #fecaca", borderRadius: 6, resize: "vertical", minHeight: 60 }} rows={2} />
+              <div className="online-actions" style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button className="outline-btn" onClick={() => { setRejectingId(null); setRejectReason(""); }} disabled={busy} data-testid={`reject-cancel-${o.id}`}>Batal</button>
+                <button className="danger-btn" onClick={() => submitReject(o.id)} disabled={busy || !rejectReason.trim()} data-testid={`reject-submit-${o.id}`}>
+                  {state === "rejecting" ? <><RefreshCw size={13} className="spin"/> Memproses…</> : <><X size={13}/> Tolak Pesanan</>}
+                </button>
+              </div>
+            </div>}
           </div>;
         })}
       </div>
     </div>
+    {proofImg && <div className="modal-backdrop" style={{ zIndex: 60 }} onClick={() => setProofImg("")} data-testid="proof-lightbox">
+      <div style={{ position: "relative", maxWidth: "92vw", maxHeight: "92vh" }} onClick={(e) => e.stopPropagation()}>
+        <button className="modal-close" onClick={() => setProofImg("")}><X size={18}/></button>
+        <img src={proofImg} alt="Bukti pembayaran" style={{ maxWidth: "92vw", maxHeight: "92vh", borderRadius: 12, background: "#fff" }} data-testid="proof-lightbox-image"/>
+      </div>
+    </div>}
   </div>;
 }
 
@@ -3399,13 +3452,15 @@ function CustomerSelfOrder() {
   </div>;
 
   if (step === "done") {
+    // Match either "Diproses" (legacy) or "processing" (post-verify) — iter31 unified label.
+    const normalized = status === "processing" ? "Diproses" : status;
     const trackerSteps = [
-      { key: "Pesanan Diterima", icon: Check, label: "Pesanan Diterima" },
-      { key: "Diproses", icon: Coffee, label: "Sedang Dibuat Dapur" },
+      { key: "Pesanan Diterima", icon: Check, label: "Pesanan Terkirim ke Kasir" },
+      { key: "Diproses", icon: Coffee, label: "Pesanan Diverifikasi & Sedang Disiapkan" },
       { key: "Siap diambil", icon: Package, label: "Pesanan Siap" },
       { key: "Selesai", icon: Star, label: "Selesai" },
     ];
-    const idx = trackerSteps.findIndex((s) => s.key === status);
+    const idx = trackerSteps.findIndex((s) => s.key === normalized);
     return <div className="csa" data-testid="customer-self-order">
       <div className="csa-topbar tracking">
         <div className="csa-logo">{branding.logo_url ? <img src={branding.logo_url} alt=""/> : <Coffee size={20}/>}</div>
