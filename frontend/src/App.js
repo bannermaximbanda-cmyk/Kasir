@@ -1062,7 +1062,11 @@ function Inventory({ products, reload, notify }) {
   const [movements, setMovements] = useState([]);
   const [mvFilter, setMvFilter] = useState({ product_id: "", kind: "" });
   const [loadingMv, setLoadingMv] = useState(false);
-  const doAdjust = async (id, quantity, kind, reason) => { await axios.patch(`${API}/products/${id}/stock`, { quantity, kind, reason, note: "" }); reload(); };
+  const doAdjust = async (id, quantity, kind, reason, idemKey) => {
+    const headers = idemKey ? { "Idempotency-Key": idemKey } : {};
+    await axios.patch(`${API}/products/${id}/stock`, { quantity, kind, reason, note: "" }, { headers });
+    reload();
+  };
 
   const loadMovements = async () => {
     setLoadingMv(true);
@@ -1225,9 +1229,9 @@ function Inventory({ products, reload, notify }) {
         </div>
       </section>
     </>}
-    {showIn && <StockModal title="Barang masuk (Restock)" products={products} kind="in" onClose={() => setShowIn(false)} onSubmit={(pid, qty, note) => { doAdjust(pid, qty, "in", note || "Restock"); setShowIn(false); notify("Stok masuk tercatat"); }} />}
-    {showOut && <StockModal title="Barang keluar / rusak" products={products} kind="out" onClose={() => setShowOut(false)} onSubmit={(pid, qty, note) => { doAdjust(pid, -Math.abs(qty), "out", note || "Basi/Rusak"); setShowOut(false); notify("Stok keluar tercatat"); }} />}
-    {showOpname && <StockModal title="Stock opname (Audit)" products={products} kind="opname" onClose={() => setShowOpname(false)} onSubmit={(pid, qty, note) => { doAdjust(pid, qty, "opname", note || "Adjust opname"); setShowOpname(false); notify("Stok disesuaikan"); }} />}
+    {showIn && <StockModal title="Barang masuk (Restock)" products={products} kind="in" onClose={() => setShowIn(false)} onSubmit={async (pid, qty, note, idemKey) => { await doAdjust(pid, qty, "in", note || "Restock", idemKey); setShowIn(false); notify("Stok masuk tercatat"); }} />}
+    {showOut && <StockModal title="Barang keluar / rusak" products={products} kind="out" onClose={() => setShowOut(false)} onSubmit={async (pid, qty, note, idemKey) => { await doAdjust(pid, -Math.abs(qty), "out", note || "Basi/Rusak", idemKey); setShowOut(false); notify("Stok keluar tercatat"); }} />}
+    {showOpname && <StockModal title="Stock opname (Audit)" products={products} kind="opname" onClose={() => setShowOpname(false)} onSubmit={async (pid, qty, note, idemKey) => { await doAdjust(pid, qty, "opname", note || "Adjust opname", idemKey); setShowOpname(false); notify("Stok disesuaikan"); }} />}
   </>;
 }
 function StockModal({ title, products, kind, onClose, onSubmit }) {
@@ -1235,11 +1239,20 @@ function StockModal({ title, products, kind, onClose, onSubmit }) {
   const [qty, setQty] = useState("");
   const [note, setNote] = useState("");
   const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [idemKey] = useState(() => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `idem-${Date.now()}-${Math.random()}`));
   const filtered = useMemo(() => products.filter((p) => p.name.toLowerCase().includes(search.toLowerCase())), [products, search]);
   useEffect(() => { if (filtered.length && !filtered.find((p) => p.id === pid)) setPid(filtered[0].id); }, [filtered]);
-  const submit = () => { const n = Number(qty); if (!n && kind !== "opname") return; onSubmit(pid, n || 0, note); };
+  const submit = async () => {
+    if (saving) return;
+    const n = Number(qty);
+    if (!n && kind !== "opname") return;
+    setSaving(true);
+    try { await onSubmit(pid, n || 0, note, idemKey); }
+    catch (e) { setSaving(false); alert(e?.response?.data?.detail || "Gagal menyimpan stok"); }
+  };
   return <div className="modal-backdrop"><div className="pay-modal" data-testid="stock-modal">
-    <button className="modal-close" onClick={onClose}><X size={18} /></button>
+    <button className="modal-close" onClick={onClose} disabled={saving}><X size={18} /></button>
     <div className="pay-head"><h2>{title}</h2><span>Riwayat tersimpan otomatis</span></div>
     <div className="pay-body">
       <label>Cari produk</label>
@@ -1251,7 +1264,9 @@ function StockModal({ title, products, kind, onClose, onSubmit }) {
       <label>Catatan</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Nomor nota / alasan" data-testid="stock-note-input" />
     </div>
-    <button className="primary-btn full" onClick={submit} data-testid="stock-submit-button">Simpan</button>
+    <button className="primary-btn full" onClick={submit} disabled={saving} data-testid="stock-submit-button">
+      {saving ? <><RefreshCw size={14} className="spin"/> Menyimpan…</> : "Simpan"}
+    </button>
   </div></div>;
 }
 
@@ -1277,11 +1292,20 @@ function Expenses({ expenses, reload, notify, session, shift }) {
 }
 function ExpenseModal({ onClose, onSaved, session, shift }) {
   const [form, setForm] = useState({ category: "Pembelian Bahan Baku", note: "", amount: "", date: new Date().toISOString().slice(0, 10), method: "Cash" });
+  const [saving, setSaving] = useState(false);
+  const [idemKey] = useState(() => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `idem-${Date.now()}-${Math.random()}`));
   const save = async () => {
+    if (saving) return;
     const amt = Number(form.amount);
     if (!amt) return alert("Nominal wajib diisi");
-    await axios.post(`${API}/expenses`, { ...form, amount: amt });
-    onSaved(); onClose();
+    setSaving(true);
+    try {
+      await axios.post(`${API}/expenses`, { ...form, amount: amt }, { headers: { "Idempotency-Key": idemKey } });
+      onSaved(); onClose();
+    } catch (e) {
+      setSaving(false);
+      alert(e?.response?.data?.detail || "Gagal menyimpan pengeluaran");
+    }
   };
   return <div className="modal-backdrop"><div className="pay-modal" data-testid="expense-modal">
     <button className="modal-close" onClick={onClose}><X size={18} /></button>
@@ -1304,7 +1328,9 @@ function ExpenseModal({ onClose, onSaved, session, shift }) {
       <label>Metode</label>
       <select value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })} data-testid="expense-method-select"><option>Cash</option><option>Transfer</option></select>
     </div>
-    <button className="primary-btn full" onClick={save} data-testid="expense-save-button">Simpan</button>
+    <button className="primary-btn full" onClick={save} disabled={saving} data-testid="expense-save-button">
+      {saving ? <><RefreshCw size={14} className="spin"/> Menyimpan…</> : "Simpan"}
+    </button>
   </div></div>;
 }
 
@@ -3342,6 +3368,10 @@ function CustomerSelfOrder() {
   const [category, setCategory] = useState("Semua");
   const [variantPick, setVariantPick] = useState(null);
   const [showCheckout, setShowCheckout] = useState(false);
+  // Iter32 anti-duplicate — one key per checkout session, generated on first checkout drawer open.
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [checkoutKey, setCheckoutKey] = useState("");
+  const [submittedOnce, setSubmittedOnce] = useState(false); // hard-lock after first success
 
   const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
   const tax = taxConfig.enabled && taxConfig.percent > 0 ? Math.round(subtotal * (taxConfig.percent / 100)) : 0;
@@ -3401,11 +3431,33 @@ function CustomerSelfOrder() {
   });
   const adjust = (key, delta) => setCart((cur) => cur.map((i) => i.key === key ? { ...i, qty: i.qty + delta } : i).filter((i) => i.qty > 0));
   const handleFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setProof(r.result); r.readAsDataURL(f); };
+  // Iter32 — rehydrate the per-tab hard-lock so a manual refresh cannot re-send the same order.
+  useEffect(() => {
+    try {
+      const cached = sessionStorage.getItem(`csa_last_submitted:${outletId}:${tableParam}`);
+      if (cached) { setCheckoutKey(cached); setSubmittedOnce(true); }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Generate a fresh idempotency key when the checkout drawer opens for the first time.
+  const openCheckout = () => {
+    if (!checkoutKey) {
+      const key = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `csa-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      setCheckoutKey(key);
+    }
+    setShowCheckout(true);
+  };
+
   const sendOrder = async () => {
+    if (isSubmitting || submittedOnce) return; // hard-guard against rapid taps and refresh-retry
     if (!customerName.trim()) { alert("Nama pelanggan wajib diisi"); return; }
     if (!customerPhone.trim() || customerPhone.length < 8) { alert("Nomor WhatsApp wajib diisi (min 8 digit)"); return; }
+    const idempotencyKey = checkoutKey || ((typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `csa-${Date.now()}`);
+    if (!checkoutKey) setCheckoutKey(idempotencyKey);
+    setIsSubmitting(true);
     try {
       const { data } = await axios.post(`${API}/self-order`, {
+        idempotency_key: idempotencyKey,
         table: `Meja ${tableParam}`,
         outlet_id: outletId,
         customer_name: customerName.trim(),
@@ -3413,9 +3465,14 @@ function CustomerSelfOrder() {
         lines: cart.map((i) => ({ product_id: String(i.id), name: i.name, quantity: i.qty, price: i.price, vendor: i.vendor, merchant_id: i.merchant_id, variant_id: i.variant_id || null, variant_name: i.variant_name || "", notes: i.notes || "" })),
         total, notes: "Self-service QR",
         payment_method: payMethod, payment_proof: proof,
-      });
+      }, { headers: { "Idempotency-Key": idempotencyKey } });
+      // Success — hard-lock this tab so refresh cannot resubmit the same order.
+      try { sessionStorage.setItem(`csa_last_submitted:${outletId}:${tableParam}`, idempotencyKey); } catch {}
+      setSubmittedOnce(true);
       setOrderId(data.id); setStatus(data.status || "Pesanan Diterima"); setStep("done"); setShowCheckout(false);
     } catch (e) {
+      // Only release the button on real failure — customer can retry.
+      setIsSubmitting(false);
       if (e.response?.status === 423) setStep("closed");
       else alert(e.response?.data?.detail || "Gagal mengirim pesanan");
     }
@@ -3557,7 +3614,7 @@ function CustomerSelfOrder() {
     {/* Floating bottom cart */}
     {itemCount > 0 && <div className="csa-float" data-testid="customer-cart-bar">
       <div><b>{itemCount} Item</b><span>{money(total)}</span></div>
-      <button onClick={() => setShowCheckout(true)} data-testid="customer-checkout-button">Lanjut ke Pembayaran <ChevronRight size={14}/></button>
+      <button onClick={openCheckout} data-testid="customer-checkout-button">Lanjut ke Pembayaran <ChevronRight size={14}/></button>
     </div>}
     {/* Variant modal */}
     {variantPick && <CsaVariantModal product={variantPick} onClose={() => setVariantPick(null)} onAdd={(v, n) => { addToCart(variantPick, v, n); setVariantPick(null); }} />}
@@ -3626,7 +3683,9 @@ function CustomerSelfOrder() {
           <input type="file" accept="image/*" onChange={handleFile} data-testid="customer-proof-input" className="csa-input"/>
           {proof && <div className="proof-thumb"><img src={proof} alt="bukti"/><Check size={16} color="#059669"/></div>}
         </>}
-        <button className="csa-submit" onClick={sendOrder} data-testid="customer-send-order">Kirim Pesanan · {money(total)}</button>
+        <button className="csa-submit" onClick={sendOrder} disabled={isSubmitting || submittedOnce} data-testid="customer-send-order">
+          {isSubmitting ? <><RefreshCw size={14} className="spin"/> Mengirim…</> : submittedOnce ? "✓ Pesanan Terkirim" : `Kirim Pesanan · ${money(total)}`}
+        </button>
       </div>
     </div>}
   </div>;
@@ -3664,12 +3723,26 @@ function HistoryModal({ onClose, notify }) {
   const [voiding, setVoiding] = useState(null);
   const [pin, setPin] = useState("");
   const [reason, setReason] = useState("");
+  const [voidBusy, setVoidBusy] = useState(false);
+  const voidIdemRef = useRef({});
   const load = () => axios.get(`${API}/pos/history`).then(({ data }) => setSales(data)).catch(() => setSales([]));
   useEffect(() => { load(); }, []);
+  const openVoid = (s) => {
+    setVoiding(s);
+    if (!voidIdemRef.current[s.id]) {
+      voidIdemRef.current[s.id] = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `idem-${Date.now()}-${Math.random()}`;
+    }
+  };
   const submitVoid = async () => {
+    if (voidBusy) return;
     if (!pin || pin.length < 6) return notify("Masukkan kode 6 huruf dari admin");
-    try { await axios.post(`${API}/sales/${voiding.id}/void`, { pin, reason }); setVoiding(null); setPin(""); setReason(""); load(); notify("Transaksi dibatalkan"); }
-    catch (e) { notify(e.response?.data?.detail || "Gagal membatalkan"); }
+    setVoidBusy(true);
+    try {
+      const idemKey = voidIdemRef.current[voiding.id];
+      await axios.post(`${API}/sales/${voiding.id}/void`, { pin, reason }, { headers: { "Idempotency-Key": idemKey } });
+      setVoiding(null); setPin(""); setReason(""); load(); notify("Transaksi dibatalkan");
+    } catch (e) { notify(e.response?.data?.detail || "Gagal membatalkan"); }
+    finally { setVoidBusy(false); }
   };
   return <div className="modal-backdrop">
     <div className="online-modal" data-testid="history-modal">
@@ -3685,7 +3758,7 @@ function HistoryModal({ onClose, notify }) {
           <ul className="online-lines">{(s.lines || []).slice(0, 3).map((ln, i) => <li key={i}><b>{ln.quantity}×</b> {ln.name}</li>)}{(s.lines || []).length > 3 && <li>+{s.lines.length - 3} item</li>}</ul>
           <div className="history-foot">
             <span className={`status-badge ${s.status}`}>{s.status === "voided" ? "DIBATALKAN" : s.payment_method}</span>
-            {s.status !== "voided" && <button className="small-action danger" onClick={() => setVoiding(s)} data-testid={`void-${s.id}`}><X size={11}/> Batalkan</button>}
+            {s.status !== "voided" && <button className="small-action danger" onClick={() => openVoid(s)} data-testid={`void-${s.id}`}><X size={11}/> Batalkan</button>}
           </div>
         </div>)}
       </div>
@@ -3700,7 +3773,9 @@ function HistoryModal({ onClose, notify }) {
             <label>Alasan (opsional)</label>
             <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Alasan pembatalan" data-testid="void-reason-input" />
           </div>
-          <button className="primary-btn full" onClick={submitVoid} data-testid="void-submit-button"><Check size={14}/> Konfirmasi pembatalan</button>
+          <button className="primary-btn full" onClick={submitVoid} disabled={voidBusy} data-testid="void-submit-button">
+            {voidBusy ? <><RefreshCw size={14} className="spin"/> Memproses…</> : <><Check size={14}/> Konfirmasi pembatalan</>}
+          </button>
         </div>
       </div>}
     </div>

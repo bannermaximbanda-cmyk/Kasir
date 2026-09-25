@@ -415,6 +415,28 @@ See `/app/memory/test_credentials.md`.
 
 **Housekeeping**: 82 test rows (kitchen_orders + self_orders TEST-prefix) dan demo order screenshot dibersihkan.
 
+## Iter33 — P0 Anti-Double-Click Idempotency Expansion (Feb 2026)
+
+Lanjutan iter32. Perluasan idempotency lock ke 3 endpoint P0 lain yang teraudit rentan double-submit:
+
+**Backend** (`server.py`):
+- Helper baru `_IDEM_CACHE` (in-memory dict, TTL 15 menit) + fungsi `_idem_get()` / `_idem_set()`.
+- Endpoint `POST /api/expenses` — replay `Idempotency-Key` header dalam 15 menit → cached response, 0 row baru.
+- Endpoint `PATCH /api/products/{id}/stock` — replay stock adjust → 1 delta stok, bukan Nx.
+- Endpoint `POST /api/sales/{sale_id}/void` — replay void → 1 stock restore, bukan Nx.
+
+**Frontend** (`App.js`):
+- `StockModal`: state `saving` + `idemKey` (crypto.randomUUID) + spinner + disabled + header `Idempotency-Key`.
+- `ExpenseModal`: idem key + disabled + spinner.
+- `HistoryModal.submitVoid`: state `voidBusy` + per-sale idem key via `useRef` + disabled + spinner.
+
+**Verified via pytest** (`tests/test_iteration33_p0_idempotency.py`, 3/3 pass):
+- `test_expense_idempotency_replay` ✅ — 5 concurrent POST expenses → 1 DB row, semua reply id sama.
+- `test_stock_adjust_idempotency` ✅ — 5x PATCH stock +7 → final stock 17 (bukan 45).
+- `test_void_sale_idempotency` ✅ — 5x void concurrent → sale voided sekali, stock restored sekali.
+
+**Housekeeping**: 7 TEST_-tagged expense rows dari test run dibersihkan lewat SQL delete.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).

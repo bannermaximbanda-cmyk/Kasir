@@ -144,6 +144,8 @@ class Sale(Base):
 class SelfOrder(Base):
     __tablename__ = "mjd_self_orders"
     id = Column(String(36), primary_key=True, default=gen_uuid)
+    # Iter32: idempotency key from customer device — same key within 15 min = replay.
+    idempotency_key = Column(String(64), index=True, nullable=True)
     table_no = Column(String(32), default="Meja 01")
     outlet_id = Column(String(36), index=True, default="outlet-sudirman")
     customer_name = Column(String(120), default="")

@@ -28,6 +28,36 @@ app = FastAPI(title="MJD Kupi API", version="2.0.0")
 api_router = APIRouter(prefix="/api")
 
 # -----------------------------------------------------------------------------
+# In-memory idempotency lock (15 min TTL) for endpoints without DB idem column.
+# Keyed by (user_id, scope, idem_key). Stores cached response for replay.
+# -----------------------------------------------------------------------------
+_IDEM_CACHE: dict[tuple, tuple[datetime, Any]] = {}
+_IDEM_TTL = timedelta(minutes=15)
+
+
+def _idem_get(user_id: str, scope: str, request: Request) -> tuple[Optional[str], Optional[Any]]:
+    """Return (key, cached_response). cached_response is not None if replay."""
+    key = (request.headers.get("Idempotency-Key") or "").strip()[:64]
+    if not key:
+        return None, None
+    now = datetime.now(timezone.utc)
+    # Sweep expired
+    for k in list(_IDEM_CACHE.keys()):
+        ts, _ = _IDEM_CACHE[k]
+        if now - ts > _IDEM_TTL:
+            _IDEM_CACHE.pop(k, None)
+    entry = _IDEM_CACHE.get((user_id, scope, key))
+    if entry and (now - entry[0]) <= _IDEM_TTL:
+        return key, entry[1]
+    return key, None
+
+
+def _idem_set(user_id: str, scope: str, key: Optional[str], response: Any) -> None:
+    if not key:
+        return
+    _IDEM_CACHE[(user_id, scope, key)] = (datetime.now(timezone.utc), response)
+
+# -----------------------------------------------------------------------------
 # Schemas (request / response models)
 # -----------------------------------------------------------------------------
 
@@ -137,6 +167,7 @@ class SelfOrderInput(BaseModel):
     customer_name: str = ""
     customer_phone: str = ""
     outlet_id: str = "outlet-sudirman"
+    idempotency_key: Optional[str] = None
 
 
 class VoidSaleInput(BaseModel):
@@ -795,9 +826,14 @@ async def delete_product(
 async def adjust_stock(
     product_id: str,
     payload: StockAdjustment,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(current_user),
 ):
+    # Idempotency: replay same Idempotency-Key within 15 min returns cached result
+    idem_key, cached = _idem_get(user.id, f"stock:{product_id}", request)
+    if cached is not None:
+        return {**cached, "_idempotent_replay": True}
     result = await db.execute(select(M.Product).where(M.Product.id == product_id))
     product = result.scalar_one_or_none()
     if not product:
@@ -840,7 +876,9 @@ async def adjust_stock(
     ))
     await db.commit()
     await db.refresh(product)
-    return to_dict(product)
+    resp = to_dict(product)
+    _idem_set(user.id, f"stock:{product_id}", idem_key, resp)
+    return resp
 
 
 @api_router.get("/stock-logs")
@@ -883,9 +921,14 @@ async def list_expenses(
 @api_router.post("/expenses")
 async def create_expense(
     payload: ExpenseInput,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(current_user),
 ):
+    # Idempotency: replay same Idempotency-Key within 15 min returns cached result
+    idem_key, cached = _idem_get(user.id, "expense", request)
+    if cached is not None:
+        return {**cached, "_idempotent_replay": True}
     # Auto-bind kasir/admin session to prevent forgery
     shift_id = None
     if user.role == "Kasir":
@@ -908,7 +951,9 @@ async def create_expense(
     db.add(expense)
     await db.commit()
     await db.refresh(expense)
-    return to_dict(expense)
+    resp = to_dict(expense)
+    _idem_set(user.id, "expense", idem_key, resp)
+    return resp
 
 
 # -----------------------------------------------------------------------------
@@ -1317,9 +1362,30 @@ async def dashboard_analytics(
 # -----------------------------------------------------------------------------
 
 @api_router.post("/self-order")
-async def create_self_order(payload: SelfOrderInput, db: AsyncSession = Depends(get_db)):
+async def create_self_order(payload: SelfOrderInput, request: Request, db: AsyncSession = Depends(get_db)):
     if not payload.customer_name:
         raise HTTPException(status_code=400, detail="Nama pelanggan wajib diisi")
+    # ── Iter32: Idempotency guard (mirrors create_sale, ~line 955).
+    # Customer devices generate a UUID once per checkout session; retry within 15 min
+    # returns the ORIGINAL SelfOrder instead of creating duplicates. This is the
+    # authoritative defense against double-tap on "Kirim Pesanan" — even if the
+    # frontend disabled-state fails or the customer refreshes/retries, only ONE
+    # SelfOrder is ever created for the same (idempotency_key, outlet_id, table_no).
+    idem_key = (payload.idempotency_key or request.headers.get("Idempotency-Key") or "").strip()[:64]
+    if idem_key:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+        prev = await db.execute(
+            select(M.SelfOrder).where(
+                M.SelfOrder.idempotency_key == idem_key,
+                M.SelfOrder.outlet_id == payload.outlet_id,
+                M.SelfOrder.created_at >= cutoff,
+            ).order_by(M.SelfOrder.created_at.desc()).limit(1)
+        )
+        existing = prev.scalar_one_or_none()
+        if existing:
+            resp = to_dict(existing)
+            resp["_idempotent_replay"] = True
+            return resp
     # Check if any cashier has an open shift at this outlet
     active_shift = await db.execute(
         select(M.Shift).where(M.Shift.status == "open", M.Shift.outlet_id == payload.outlet_id)
@@ -1328,6 +1394,7 @@ async def create_self_order(payload: SelfOrderInput, db: AsyncSession = Depends(
         raise HTTPException(status_code=423, detail="Toko sedang tutup - belum ada kasir buka shift")
     order = M.SelfOrder(
         id=str(uuid.uuid4()),
+        idempotency_key=idem_key or None,
         table_no=payload.table,
         outlet_id=payload.outlet_id,
         customer_name=payload.customer_name,
@@ -2502,9 +2569,14 @@ async def _verify_pin(db: AsyncSession, outlet_id: str, pin: str) -> bool:
 async def void_sale(
     sale_id: str,
     payload: VoidSaleInput,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
 ):
+    # Idempotency: replay same Idempotency-Key within 15 min returns cached result
+    idem_key, cached = _idem_get(user.id, f"void:{sale_id}", request)
+    if cached is not None:
+        return {**cached, "_idempotent_replay": True}
     result = await db.execute(select(M.Sale).where(M.Sale.id == sale_id))
     sale = result.scalar_one_or_none()
     if not sale:
@@ -2526,7 +2598,9 @@ async def void_sale(
     sale.voided_at = datetime.now(timezone.utc)
     await db.commit()
     logger.info(f"[audit] sale_voided id={sale.id} by={user.username or user.email} reason={payload.reason}")
-    return to_dict(sale)
+    resp = to_dict(sale)
+    _idem_set(user.id, f"void:{sale_id}", idem_key, resp)
+    return resp
 
 
 @api_router.get("/pos/history")
@@ -2841,6 +2915,8 @@ async def bootstrap():
             "CREATE INDEX IF NOT EXISTS ix_sales_outlet ON mjd_sales(outlet_id)",
             "ALTER TABLE mjd_sales ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64)",
             "CREATE INDEX IF NOT EXISTS ix_sales_idempotency ON mjd_sales(idempotency_key)",
+            "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_selforders_idempotency ON mjd_self_orders(idempotency_key)",
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(32) DEFAULT ''",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_scheme VARCHAR(16) DEFAULT 'percent'",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_fixed FLOAT DEFAULT 0",
