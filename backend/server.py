@@ -11,7 +11,7 @@ import jwt
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select, or_
+from sqlalchemy import delete, func, select, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.cors import CORSMiddleware
 
@@ -30,32 +30,77 @@ api_router = APIRouter(prefix="/api")
 # -----------------------------------------------------------------------------
 # In-memory idempotency lock (15 min TTL) for endpoints without DB idem column.
 # Keyed by (user_id, scope, idem_key). Stores cached response for replay.
+# Uses an asyncio.Lock per key to serialize concurrent requests with the same key
+# (protects against tap-flood race conditions where all replicas read cache=None
+# before any of them writes).
 # -----------------------------------------------------------------------------
+import asyncio as _asyncio
+
 _IDEM_CACHE: dict[tuple, tuple[datetime, Any]] = {}
+_IDEM_LOCKS: dict[tuple, _asyncio.Lock] = {}
 _IDEM_TTL = timedelta(minutes=15)
 
 
-def _idem_get(user_id: str, scope: str, request: Request) -> tuple[Optional[str], Optional[Any]]:
-    """Return (key, cached_response). cached_response is not None if replay."""
+def _idem_lock_for(user_id: str, scope: str, key: str) -> _asyncio.Lock:
+    k = (user_id, scope, key)
+    lock = _IDEM_LOCKS.get(k)
+    if lock is None:
+        lock = _asyncio.Lock()
+        _IDEM_LOCKS[k] = lock
+    return lock
+
+
+async def _idem_begin(user_id: str, scope: str, request: Request):
+    """
+    Serialize concurrent duplicate requests. Returns (key, cached_response_or_None,
+    lock_or_None). If cached is not None → caller returns immediately (lock released).
+    Otherwise caller MUST call _idem_finish(key, scope, response, lock).
+    If no Idempotency-Key header → returns (None, None, None) and no locking.
+    """
     key = (request.headers.get("Idempotency-Key") or "").strip()[:64]
     if not key:
-        return None, None
+        return None, None, None
     now = datetime.now(timezone.utc)
-    # Sweep expired
+    # Sweep expired entries
     for k in list(_IDEM_CACHE.keys()):
         ts, _ = _IDEM_CACHE[k]
         if now - ts > _IDEM_TTL:
             _IDEM_CACHE.pop(k, None)
+            _IDEM_LOCKS.pop(k, None)
+    lock = _idem_lock_for(user_id, scope, key)
+    await lock.acquire()
     entry = _IDEM_CACHE.get((user_id, scope, key))
-    if entry and (now - entry[0]) <= _IDEM_TTL:
-        return key, entry[1]
-    return key, None
+    if entry and (datetime.now(timezone.utc) - entry[0]) <= _IDEM_TTL:
+        lock.release()
+        return key, entry[1], None
+    return key, None, lock
 
 
-def _idem_set(user_id: str, scope: str, key: Optional[str], response: Any) -> None:
+def _idem_finish(user_id: str, scope: str, key: Optional[str], response: Any, lock) -> None:
     if not key:
         return
     _IDEM_CACHE[(user_id, scope, key)] = (datetime.now(timezone.utc), response)
+    if lock is not None and lock.locked():
+        lock.release()
+
+
+# -----------------------------------------------------------------------------
+# Payment method classification for shift recap.
+# POS uses "Cash" / "Transfer" / "QRIS"; self-order uses "Bayar di Kasir" /
+# "Transfer Bank" / "QRIS Toko". Both are stored in Sale.payment_method as-is
+# (never rewritten). Classification only happens at recap time.
+# -----------------------------------------------------------------------------
+CASH_METHODS = ("Cash", "Bayar di Kasir")
+TRANSFER_METHODS = ("Transfer", "Transfer Bank")
+QRIS_METHODS = ("QRIS", "QRIS Toko")
+
+
+def classify_payment(method: str) -> str:
+    """Return one of: 'cash' | 'transfer' | 'qris' | 'other'."""
+    if method in CASH_METHODS: return "cash"
+    if method in TRANSFER_METHODS: return "transfer"
+    if method in QRIS_METHODS: return "qris"
+    return "other"
 
 # -----------------------------------------------------------------------------
 # Schemas (request / response models)
@@ -831,54 +876,58 @@ async def adjust_stock(
     user: M.User = Depends(current_user),
 ):
     # Idempotency: replay same Idempotency-Key within 15 min returns cached result
-    idem_key, cached = _idem_get(user.id, f"stock:{product_id}", request)
+    idem_key, cached, idem_lock = await _idem_begin(user.id, f"stock:{product_id}", request)
     if cached is not None:
         return {**cached, "_idempotent_replay": True}
-    result = await db.execute(select(M.Product).where(M.Product.id == product_id))
-    product = result.scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Produk tidak ditemukan")
-    # Outlet isolation: non-super admin can only adjust products of their outlet
-    if user.role != "Super Admin" and product.outlet_id and product.outlet_id != user.outlet_id:
-        raise HTTPException(status_code=403, detail="Produk bukan milik outlet Anda")
-    stock_before = int(product.stock or 0)
-    if payload.kind == "opname":
-        product.stock = max(0, payload.quantity)
-        delta = product.stock - stock_before
-    else:
-        product.stock = max(0, stock_before + payload.quantity)
-        delta = product.stock - stock_before
-    stock_after = int(product.stock or 0)
-    outlet_id_final = product.outlet_id or user.outlet_id or "outlet-sudirman"
-    log = M.StockLog(
-        product_id=product_id,
-        outlet_id=outlet_id_final,
-        quantity=payload.quantity,
-        reason=payload.reason,
-        kind=payload.kind,
-        note=payload.note,
-        user_id=user.id,
-        user_name=user.name,
-    )
-    db.add(log)
-    # Batch C: Advanced Inventory audit trail
-    db.add(M.StockMovement(
-        product_id=product_id,
-        outlet_id=outlet_id_final,
-        kind=payload.kind,  # in | out | opname
-        delta=delta,
-        stock_before=stock_before,
-        stock_after=stock_after,
-        reason=payload.reason or ("Opname" if payload.kind == "opname" else "Adjust"),
-        operator_id=user.id,
-        operator_name=user.name,
-        ref_id="",
-    ))
-    await db.commit()
-    await db.refresh(product)
-    resp = to_dict(product)
-    _idem_set(user.id, f"stock:{product_id}", idem_key, resp)
-    return resp
+    try:
+        result = await db.execute(select(M.Product).where(M.Product.id == product_id))
+        product = result.scalar_one_or_none()
+        if not product:
+            raise HTTPException(status_code=404, detail="Produk tidak ditemukan")
+        # Outlet isolation: non-super admin can only adjust products of their outlet
+        if user.role != "Super Admin" and product.outlet_id and product.outlet_id != user.outlet_id:
+            raise HTTPException(status_code=403, detail="Produk bukan milik outlet Anda")
+        stock_before = int(product.stock or 0)
+        if payload.kind == "opname":
+            product.stock = max(0, payload.quantity)
+            delta = product.stock - stock_before
+        else:
+            product.stock = max(0, stock_before + payload.quantity)
+            delta = product.stock - stock_before
+        stock_after = int(product.stock or 0)
+        outlet_id_final = product.outlet_id or user.outlet_id or "outlet-sudirman"
+        log = M.StockLog(
+            product_id=product_id,
+            outlet_id=outlet_id_final,
+            quantity=payload.quantity,
+            reason=payload.reason,
+            kind=payload.kind,
+            note=payload.note,
+            user_id=user.id,
+            user_name=user.name,
+        )
+        db.add(log)
+        # Batch C: Advanced Inventory audit trail
+        db.add(M.StockMovement(
+            product_id=product_id,
+            outlet_id=outlet_id_final,
+            kind=payload.kind,  # in | out | opname
+            delta=delta,
+            stock_before=stock_before,
+            stock_after=stock_after,
+            reason=payload.reason or ("Opname" if payload.kind == "opname" else "Adjust"),
+            operator_id=user.id,
+            operator_name=user.name,
+            ref_id="",
+        ))
+        await db.commit()
+        await db.refresh(product)
+        resp = to_dict(product)
+        _idem_finish(user.id, f"stock:{product_id}", idem_key, resp, idem_lock)
+        return resp
+    finally:
+        if idem_lock is not None and idem_lock.locked():
+            idem_lock.release()
 
 
 @api_router.get("/stock-logs")
@@ -926,34 +975,38 @@ async def create_expense(
     user: M.User = Depends(current_user),
 ):
     # Idempotency: replay same Idempotency-Key within 15 min returns cached result
-    idem_key, cached = _idem_get(user.id, "expense", request)
+    idem_key, cached, idem_lock = await _idem_begin(user.id, "expense", request)
     if cached is not None:
         return {**cached, "_idempotent_replay": True}
-    # Auto-bind kasir/admin session to prevent forgery
-    shift_id = None
-    if user.role == "Kasir":
-        r = await db.execute(select(M.Shift).where(M.Shift.cashier_id == user.id, M.Shift.status == "open"))
-        s = r.scalar_one_or_none()
-        if s:
-            shift_id = s.id
-    expense = M.Expense(
-        id=payload.id or str(uuid.uuid4()),
-        category=payload.category,
-        note=payload.note,
-        amount=payload.amount,
-        date=payload.date,
-        method=payload.method,
-        outlet_id=user.outlet_id or "outlet-sudirman",
-        user_id=user.id,
-        user_name=user.name,
-        shift_id=shift_id,
-    )
-    db.add(expense)
-    await db.commit()
-    await db.refresh(expense)
-    resp = to_dict(expense)
-    _idem_set(user.id, "expense", idem_key, resp)
-    return resp
+    try:
+        # Auto-bind kasir/admin session to prevent forgery
+        shift_id = None
+        if user.role == "Kasir":
+            r = await db.execute(select(M.Shift).where(M.Shift.cashier_id == user.id, M.Shift.status == "open"))
+            s = r.scalar_one_or_none()
+            if s:
+                shift_id = s.id
+        expense = M.Expense(
+            id=payload.id or str(uuid.uuid4()),
+            category=payload.category,
+            note=payload.note,
+            amount=payload.amount,
+            date=payload.date,
+            method=payload.method,
+            outlet_id=user.outlet_id or "outlet-sudirman",
+            user_id=user.id,
+            user_name=user.name,
+            shift_id=shift_id,
+        )
+        db.add(expense)
+        await db.commit()
+        await db.refresh(expense)
+        resp = to_dict(expense)
+        _idem_finish(user.id, "expense", idem_key, resp, idem_lock)
+        return resp
+    finally:
+        if idem_lock is not None and idem_lock.locked():
+            idem_lock.release()
 
 
 # -----------------------------------------------------------------------------
@@ -1388,9 +1441,9 @@ async def create_self_order(payload: SelfOrderInput, request: Request, db: Async
             return resp
     # Check if any cashier has an open shift at this outlet
     active_shift = await db.execute(
-        select(M.Shift).where(M.Shift.status == "open", M.Shift.outlet_id == payload.outlet_id)
+        select(M.Shift.id).where(M.Shift.status == "open", M.Shift.outlet_id == payload.outlet_id).limit(1)
     )
-    if not active_shift.scalar_one_or_none():
+    if not active_shift.first():
         raise HTTPException(status_code=423, detail="Toko sedang tutup - belum ada kasir buka shift")
     order = M.SelfOrder(
         id=str(uuid.uuid4()),
@@ -2369,10 +2422,12 @@ async def close_shift(
     shift = result.scalar_one_or_none()
     if not shift:
         raise HTTPException(status_code=404, detail="Tidak ada shift aktif")
-    # Cash sales during this shift
+    # Cash sales during this shift (Cash + Bayar di Kasir — see CASH_METHODS)
     cash_r = await db.execute(
         select(func.coalesce(func.sum(M.Sale.total), 0)).where(
-            M.Sale.shift_id == shift.id, M.Sale.payment_method == "Cash", M.Sale.status != "voided"
+            M.Sale.shift_id == shift.id,
+            M.Sale.payment_method.in_(CASH_METHODS),
+            M.Sale.status != "voided",
         )
     )
     cash_sales = float(cash_r.scalar_one() or 0)
@@ -2406,24 +2461,26 @@ async def list_shifts(
 ):
     result = await db.execute(select(M.Shift).order_by(M.Shift.opened_at.desc()).limit(50))
     shifts = [to_dict(row) for row in result.scalars().all()]
-    # Enrich with realtime cash & transfer totals
+    if not shifts:
+        return shifts
+    # Single-query aggregation: SUM per (shift_id, category) using CASE, then map back.
+    ids = [s["id"] for s in shifts]
+    case_cash = func.sum(case((M.Sale.payment_method.in_(CASH_METHODS), M.Sale.total), else_=0))
+    case_trf = func.sum(case((M.Sale.payment_method.in_(TRANSFER_METHODS), M.Sale.total), else_=0))
+    case_qris = func.sum(case((M.Sale.payment_method.in_(QRIS_METHODS), M.Sale.total), else_=0))
+    agg_r = await db.execute(
+        select(M.Sale.shift_id, case_cash, case_trf, case_qris, func.count(M.Sale.id))
+        .where(M.Sale.shift_id.in_(ids), M.Sale.status != "voided")
+        .group_by(M.Sale.shift_id)
+    )
+    agg = {sid: (float(c or 0), float(t or 0), float(q or 0), int(n or 0)) for sid, c, t, q, n in agg_r.all()}
     for s in shifts:
-        cash_r = await db.execute(
-            select(func.coalesce(func.sum(M.Sale.total), 0)).where(
-                M.Sale.shift_id == s["id"], M.Sale.payment_method == "Cash"
-            )
-        )
-        trf_r = await db.execute(
-            select(func.coalesce(func.sum(M.Sale.total), 0)).where(
-                M.Sale.shift_id == s["id"], M.Sale.payment_method != "Cash"
-            )
-        )
-        count_r = await db.execute(
-            select(func.count(M.Sale.id)).where(M.Sale.shift_id == s["id"])
-        )
-        s["total_cash"] = float(cash_r.scalar_one() or 0)
-        s["total_transfer"] = float(trf_r.scalar_one() or 0)
-        s["transaction_count"] = int(count_r.scalar_one() or 0)
+        c, t, q, n = agg.get(s["id"], (0.0, 0.0, 0.0, 0))
+        s["total_cash"] = c
+        s["total_transfer"] = t
+        s["total_qris"] = q
+        s["total_omset"] = c + t + q
+        s["transaction_count"] = n
     return shifts
 
 
@@ -2441,10 +2498,11 @@ async def shift_report(
     if user.role == "Kasir" and shift.cashier_id != user.id:
         raise HTTPException(status_code=403, detail="Bukan shift Anda")
 
-    sales_r = await db.execute(select(M.Sale).where(M.Sale.shift_id == shift_id))
+    sales_r = await db.execute(select(M.Sale).where(M.Sale.shift_id == shift_id, M.Sale.status != "voided"))
     sales = sales_r.scalars().all()
-    cash = sum(s.total for s in sales if s.payment_method == "Cash")
-    transfer = sum(s.total for s in sales if s.payment_method != "Cash")
+    cash = sum(s.total for s in sales if s.payment_method in CASH_METHODS)
+    transfer = sum(s.total for s in sales if s.payment_method in TRANSFER_METHODS)
+    qris = sum(s.total for s in sales if s.payment_method in QRIS_METHODS)
     tables_paid = len({s.table_no for s in sales})
 
     # Pending self-orders on this shift's outlet (informational)
@@ -2491,7 +2549,8 @@ async def shift_report(
         "cashier_name": shift.cashier_name,
         "total_cash": float(cash),
         "total_transfer": float(transfer),
-        "total_omset": float(cash + transfer),
+        "total_qris": float(qris),
+        "total_omset": float(cash + transfer + qris),
         "tables_paid": tables_paid,
         "tables_pending": tables_pending,
         "unpaid_total": float(unpaid_total),
@@ -2574,33 +2633,37 @@ async def void_sale(
     user: M.User = Depends(require_roles("Kasir", "Admin", "Super Admin")),
 ):
     # Idempotency: replay same Idempotency-Key within 15 min returns cached result
-    idem_key, cached = _idem_get(user.id, f"void:{sale_id}", request)
+    idem_key, cached, idem_lock = await _idem_begin(user.id, f"void:{sale_id}", request)
     if cached is not None:
         return {**cached, "_idempotent_replay": True}
-    result = await db.execute(select(M.Sale).where(M.Sale.id == sale_id))
-    sale = result.scalar_one_or_none()
-    if not sale:
-        raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
-    if sale.status == "voided":
-        raise HTTPException(status_code=400, detail="Transaksi sudah dibatalkan")
-    if user.role == "Kasir" and sale.cashier_id != user.id:
-        raise HTTPException(status_code=403, detail="Bukan transaksi Anda")
-    if not await _verify_pin(db, sale.outlet_id or user.outlet_id, payload.pin):
-        raise HTTPException(status_code=403, detail="Kode otorisasi salah atau kadaluarsa")
-    # Restore stock
-    for line in (sale.lines or []):
-        pr = await db.execute(select(M.Product).where(M.Product.id == line.get("product_id")))
-        p = pr.scalar_one_or_none()
-        if p:
-            p.stock = int(p.stock or 0) + int(line.get("quantity", 0))
-    sale.status = "voided"
-    sale.void_reason = payload.reason
-    sale.voided_at = datetime.now(timezone.utc)
-    await db.commit()
-    logger.info(f"[audit] sale_voided id={sale.id} by={user.username or user.email} reason={payload.reason}")
-    resp = to_dict(sale)
-    _idem_set(user.id, f"void:{sale_id}", idem_key, resp)
-    return resp
+    try:
+        result = await db.execute(select(M.Sale).where(M.Sale.id == sale_id))
+        sale = result.scalar_one_or_none()
+        if not sale:
+            raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
+        if sale.status == "voided":
+            raise HTTPException(status_code=400, detail="Transaksi sudah dibatalkan")
+        if user.role == "Kasir" and sale.cashier_id != user.id:
+            raise HTTPException(status_code=403, detail="Bukan transaksi Anda")
+        if not await _verify_pin(db, sale.outlet_id or user.outlet_id, payload.pin):
+            raise HTTPException(status_code=403, detail="Kode otorisasi salah atau kadaluarsa")
+        # Restore stock
+        for line in (sale.lines or []):
+            pr = await db.execute(select(M.Product).where(M.Product.id == line.get("product_id")))
+            p = pr.scalar_one_or_none()
+            if p:
+                p.stock = int(p.stock or 0) + int(line.get("quantity", 0))
+        sale.status = "voided"
+        sale.void_reason = payload.reason
+        sale.voided_at = datetime.now(timezone.utc)
+        await db.commit()
+        logger.info(f"[audit] sale_voided id={sale.id} by={user.username or user.email} reason={payload.reason}")
+        resp = to_dict(sale)
+        _idem_finish(user.id, f"void:{sale_id}", idem_key, resp, idem_lock)
+        return resp
+    finally:
+        if idem_lock is not None and idem_lock.locked():
+            idem_lock.release()
 
 
 @api_router.get("/pos/history")

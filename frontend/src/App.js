@@ -3128,6 +3128,7 @@ function ShiftReportModal({ report, onClose, notify, outlets }) {
     `Pengeluaran   : Rp ${(report.expenses_total || 0).toLocaleString("id-ID")}`,
     `TOTAL CASH    : Rp ${(report.total_cash || 0).toLocaleString("id-ID")}`,
     `TOTAL TRANSFER: Rp ${(report.total_transfer || 0).toLocaleString("id-ID")}`,
+    `TOTAL QRIS    : Rp ${(report.total_qris || 0).toLocaleString("id-ID")}`,
     `TOTAL OMSET   : Rp ${(report.total_omset || 0).toLocaleString("id-ID")}`,
     "--------------------------------",
     "BREAKDOWN PER MERCHANT:",
@@ -3308,7 +3309,7 @@ function CashierMonitor({ notify, onView, pinDisabled }) {
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
   const viewReport = async (id) => { try { const { data } = await axios.get(`${API}/shifts/${id}/report`); onView(data); } catch { notify("Gagal memuat rekap"); } };
   const openCount = shifts.filter((s) => s.status === "open").length;
-  const totalOmset = shifts.reduce((a, s) => a + (s.total_cash || 0) + (s.total_transfer || 0), 0);
+  const totalOmset = shifts.reduce((a, s) => a + (s.total_omset || (s.total_cash || 0) + (s.total_transfer || 0) + (s.total_qris || 0)), 0);
   return <>
     <SectionHeader eyebrow="AUDIT KASIR" title="Monitoring shift kasir" description="Pantau kasir aktif, riwayat shift, dan generate kode otorisasi untuk approve void/edit."
       action={<button className="outline-btn" onClick={load} data-testid="refresh-cashiers-button"><Bell size={14}/> Refresh</button>} />
@@ -3321,13 +3322,14 @@ function CashierMonitor({ notify, onView, pinDisabled }) {
     <section className="panel table-panel">
       <div className="panel-head"><div><h2>Riwayat shift kasir</h2><span>Data real-time dari Supabase</span></div></div>
       <div className="data-table">
-        <div className="table-row cashier-row table-label"><span>Kasir</span><span>Waktu</span><span>Modal awal</span><span>Total cash</span><span>Total transfer</span><span>Status</span><span /></div>
+        <div className="table-row cashier-row table-label"><span>Kasir</span><span>Waktu</span><span>Modal awal</span><span>Total cash</span><span>Total transfer</span><span>Total QRIS</span><span>Status</span><span /></div>
         {shifts.map((s) => <div className="table-row cashier-row" key={s.id} data-testid={`cashier-row-${s.id}`}>
           <span className="table-product"><div className="product-dot" style={{ background: "#fff0e6" }}><UserCheck size={14} /></div><b>{s.cashier_name}</b></span>
           <span>{new Date(s.opened_at).toLocaleString("id-ID", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })}</span>
           <span>{money(s.opening_cash)}</span>
-          <span><b>{money(s.total_cash)}</b></span>
-          <span>{money(s.total_transfer)}</span>
+          <span><b data-testid={`cashier-cash-${s.id}`}>{money(s.total_cash)}</b></span>
+          <span data-testid={`cashier-transfer-${s.id}`}>{money(s.total_transfer)}</span>
+          <span data-testid={`cashier-qris-${s.id}`}>{money(s.total_qris || 0)}</span>
           <span><i className={`status-dot ${s.status === "open" ? "good" : "low"}`} />{s.status === "open" ? "BUKA" : "TUTUP"}</span>
           <button className="small-action" onClick={() => viewReport(s.id)} data-testid={`view-shift-${s.id}`}><FileText size={12} /> Rekap</button>
         </div>)}

@@ -164,6 +164,7 @@ export function buildShiftReport({ outlet, report, width = 32 }) {
   parts.push(escpos.text(twoCol("Modal Awal", formatCurrency(s.opening_cash), width)));
   parts.push(escpos.text(twoCol("Total Cash", formatCurrency(report.total_cash), width)));
   parts.push(escpos.text(twoCol("Total Transfer", formatCurrency(report.total_transfer), width)));
+  parts.push(escpos.text(twoCol("Total QRIS", formatCurrency(report.total_qris), width)));
   parts.push(new Uint8Array(escpos.bold(true)));
   parts.push(escpos.text(twoCol("TOTAL OMSET", formatCurrency(report.total_omset), width)));
   parts.push(new Uint8Array(escpos.bold(false)));

@@ -480,4 +480,48 @@ agent_communication:
           uses SameSite=None; test_csrf_self_order_allowlisted_without_header + regression accept
           fail because customer_name became required in iter13-14).
       Aggregate iter29-touched regression: 100% pass. No new failures introduced.
+
+      Iter34 (Sep 26, 2026) — Shift recap payment classification bugfix.
+      Bug: `payment_method != "Cash"` treated QRIS / QRIS Toko / Bayar di Kasir / Transfer Bank
+      as Transfer. Fix keeps DB payment_method labels intact and only classifies at recap time
+      via CASH_METHODS / TRANSFER_METHODS / QRIS_METHODS constants in server.py.
+
+      Endpoints changed (no new endpoint):
+        - POST /api/shifts/close      → cash_sales uses payment_method IN CASH_METHODS
+        - GET  /api/shifts            → single grouped aggregation (case sum) returns
+                                        total_cash / total_transfer / total_qris / total_omset
+        - GET  /api/shifts/{id}/report → adds total_qris + total_omset; voided sales excluded
+
+      Frontend changed:
+        - App.js ShiftReportModal → adds "TOTAL QRIS" line above TOTAL OMSET
+        - App.js CashierMonitor   → new "Total QRIS" column + total_omset accumulator uses
+                                     total_omset field (falls back to sum if absent)
+        - utils/thermalPrinter.js buildShiftReport → prints Total QRIS line
+
+      New test file: tests/test_iteration34_shift_payment_classify.py (8/8 pass)
+        1-6. test_payment_method_classification[Cash|Bayar di Kasir|Transfer|
+                    Transfer Bank|QRIS|QRIS Toko] — each label lands in the correct bucket only.
+        7.   test_mixed_payments_and_expected_cash — 6 sales, one per label. Expected:
+                total_cash=30k / total_transfer=70k / total_qris=110k / total_omset=210k.
+                expected_cash = 100k modal + 30k cash - 15k pengeluaran = 115k (bukan 195k).
+        8.   test_online_selforder_flows_into_shift_recap — 3 self-orders accepted by kasir
+                (QRIS Toko / Transfer Bank / Bayar di Kasir) → Sale.shift_id populated,
+                each classified correctly, transaction_count == 3 (no double-count).
+
+      Regression:
+        - tests/test_iteration33_p0_idempotency.py → 3/3 pass
+          (idempotency helper hardened with asyncio.Lock per key — original impl had a
+           TOCTOU race under true concurrency; now serialized).
+        - tests/test_iteration32_selforder_idempotency.py → passes in isolation
+          (parallel runs against shared `kasir` account are noisy but not caused by iter34).
+
+      Housekeeping: 116 kitchen_orders + 6 self_orders + 1 expense + 0 products (TEST_-tagged)
+      cleaned from Supabase after the run.
+
+      Confirmations:
+        ✅ Online order via accept_self_order still becomes a Sale with shift_id (no code path
+           changed there). No parallel "online" query added to the report — recap uses only
+           Sale rows tied to shift_id, so no double count.
+        ✅ Expenses continue to be scoped by shift_id + method="Cash" for expected_cash.
+        ✅ payment_method values in Supabase remain untouched. Classification is read-side only.
       Task 4 (Alembic) intentionally skipped per user instructions.

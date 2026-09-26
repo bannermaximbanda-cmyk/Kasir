@@ -437,6 +437,36 @@ Lanjutan iter32. Perluasan idempotency lock ke 3 endpoint P0 lain yang teraudit 
 
 **Housekeeping**: 7 TEST_-tagged expense rows dari test run dibersihkan lewat SQL delete.
 
+## Iter34 — Shift Recap Payment Classification (Feb 2026)
+
+**Bug**: `payment_method != "Cash"` di rekap shift menganggap `QRIS`, `QRIS Toko`, `Bayar di Kasir`, `Transfer Bank` semua sebagai Transfer. Total omset tetap benar tapi breakdown per metode & `expected_cash` salah (self-order QRIS ikut dihitung ke Transfer, self-order "Bayar di Kasir" tidak masuk ke expected_cash).
+
+**Fix** (klasifikasi read-side, TIDAK mengubah nilai `payment_method` di DB):
+- Tambah konstanta di `server.py`:
+  - `CASH_METHODS = ("Cash", "Bayar di Kasir")`
+  - `TRANSFER_METHODS = ("Transfer", "Transfer Bank")`
+  - `QRIS_METHODS = ("QRIS", "QRIS Toko")`
+- `POST /api/shifts/close`: `cash_sales` sekarang pakai `payment_method.in_(CASH_METHODS)`.
+- `GET /api/shifts`: satu query GROUP BY dengan `CASE WHEN` per bucket (bukan N*3 query), field baru `total_qris` + `total_omset`.
+- `GET /api/shifts/{id}/report`: field baru `total_qris` + `total_omset`. Voided sales dikecualikan.
+
+**Frontend**:
+- `ShiftReportModal`: baris "TOTAL QRIS" ditambah di atas TOTAL OMSET.
+- `CashierMonitor` (Admin): kolom Total QRIS ditambah; `totalOmset` prefer field `total_omset`.
+- `utils/thermalPrinter.js`: struk shift cetak Total QRIS.
+
+**Idempotency hardening bonus (bug ditemukan saat test iter34 concurrency)**:
+Helper `_idem_get`/`_idem_set` diganti dengan `_idem_begin`/`_idem_finish` yang pakai `asyncio.Lock` per key. Sebelumnya 5 concurrent request dengan same key bisa lolos race karena semua baca cache=None sebelum ada yang commit. Sekarang lock serialize concurrent duplicates. Applied to `stock`, `expense`, `void` endpoints.
+
+**Verified via pytest** (`tests/test_iteration34_shift_payment_classify.py`, 8/8 pass):
+- 6× `test_payment_method_classification[…]` — 1 sale per label → tepat 1 bucket terisi.
+- `test_mixed_payments_and_expected_cash` — 6 sale, 6 label; total_cash=30k, total_transfer=70k, total_qris=110k, total_omset=210k, expected_cash=115k (100k modal + 30k cash - 15k expense), bukan 195k/210k.
+- `test_online_selforder_flows_into_shift_recap` — 3 self-order di-accept → 3 Sale dengan shift_id, klasifikasi benar, `transaction_count == 3` (no double count).
+
+**Regression**: iter33 3/3 pass setelah refactor idempotency helper.
+
+**Housekeeping**: 116 kitchen_orders + 6 self_orders + 1 expense TEST_-tagged dibersihkan.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).
