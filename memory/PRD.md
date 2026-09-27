@@ -467,6 +467,26 @@ Helper `_idem_get`/`_idem_set` diganti dengan `_idem_begin`/`_idem_finish` yang 
 
 **Housekeeping**: 116 kitchen_orders + 6 self_orders + 1 expense TEST_-tagged dibersihkan.
 
+## Iter35 — CustomerSelfOrder UX Polish (Feb 2026)
+
+Tiga perubahan kecil di `CustomerSelfOrder` (App.js):
+
+1. **Default filter mode: "merchant"** (dari "category"). Saat halaman pertama kali dibuka, tab **Per Merchant** aktif otomatis; customer masih bisa switch manual ke Kategori.
+2. **Inline qty stepper di kartu produk** untuk produk **tanpa varian**:
+   - Jika belum di cart → tombol "+ Tambah" (unchanged).
+   - Jika sudah di cart → tombol berubah jadi `−  qty  +` langsung di kartu, reuse `adjust()` yang sudah ada. Klik `−` sampai qty 0 kembali ke "+ Tambah".
+   - Produk **dengan varian** TIDAK diubah — popup pilih varian tetap dipakai.
+3. **Input qty absolut di cart drawer**: di antara `−` dan `+` sekarang ada `<input type=number>` yang bisa diketik langsung (mis. 20 sekali ketik). Helper baru `setQtyAbsolute(key, next)`. Validasi: min=1, fallback ke qty sebelumnya on blur bila invalid.
+
+**File yang diubah**:
+- `frontend/src/App.js` — 4 edit: default state, product card branch, cart drawer input, `setQtyAbsolute` helper.
+- `frontend/src/App.css` — CSS `.csa-card-qty` + `.csa-drawer-qty input` (styling stepper baru, spin buttons disembunyikan).
+
+**Verified via Playwright screenshot**:
+- `csa-filter-mode-merchant` aria-selected=true saat load.
+- Klik "+ Tambah" → kartu langsung tampilkan stepper `[csa-card-qty-{pid}]`, klik `+` → qty jadi 2.
+- Cart drawer: input `[csa-qty-input-{key}]` menerima "20", Rincian Pesanan update ke `× 20`, total `Rp 300.000`.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).

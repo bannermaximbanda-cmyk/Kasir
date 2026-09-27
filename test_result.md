@@ -525,3 +525,34 @@ agent_communication:
         ✅ Expenses continue to be scoped by shift_id + method="Cash" for expected_cash.
         ✅ payment_method values in Supabase remain untouched. Classification is read-side only.
       Task 4 (Alembic) intentionally skipped per user instructions.
+
+      Iter35 (Sep 27, 2026) — CustomerSelfOrder UX polish (3 targeted changes,
+      NO refactor of unrelated logic per user directive):
+
+      1) Default `csaFilterMode` "category" → "merchant" (App.js:3485).
+         User can still switch manually to "Kategori".
+      2) Product card inline qty stepper (App.js ~3607, variant-less products only).
+         Card checks `cart.find(i => i.id === p.id && !i.variant_id)`. If found →
+         renders `<button>−</button><strong>qty</strong><button>+</button>` using the
+         existing `adjust(key, delta)` function. Click `−` down to qty=0 → filter
+         removes line → card reverts to "+ Tambah" button. Variant products keep
+         the popup flow untouched (as required).
+      3) Editable qty input in cart drawer (App.js ~3657). New helper
+         `setQtyAbsolute(key, next)` (min=1, Math.floor) so typing "20" once
+         replaces the qty absolutely instead of 20 button clicks. onChange updates
+         while typing; onBlur falls back to previous qty if empty / NaN / <1.
+
+      Verified via Playwright (script logs, direct DOM assertions):
+        • csa-filter-mode-merchant aria-selected=true on load  ✅
+        • csa-filter-mode-category aria-selected=false on load  ✅
+        • 12 "+ Tambah" buttons render on first paint  ✅
+        • Click first "+ Tambah" → `[data-testid^="csa-card-qty-"]` appears  ✅
+        • Click `[data-testid^="csa-card-inc-"]` once → qty text = "2"  ✅
+        • Open checkout drawer → `[data-testid^="csa-qty-input-"]` present  ✅
+        • Fill "20" + blur → input value stays "20", Rincian Pesanan reflects 20×  ✅
+
+      Regression: iter34 (8 tests) + iter33 (3 tests) unchanged — pure frontend delta,
+      no backend or model changes needed for iter35.
+
+      Housekeeping: kasir shift used for the smoke test closed after run
+      (opening 100k / closing 100k / variance 0). No TEST_ rows created this cycle.

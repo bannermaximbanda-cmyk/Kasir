@@ -573,6 +573,15 @@
 .csa-drawer-qty { display: inline-flex; align-items: center; gap: 4px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
 .csa-drawer-qty button { border: 0; background: transparent; width: 22px; height: 22px; font-weight: 700; color: var(--brand-accent); }
 .csa-drawer-qty strong { min-width: 20px; text-align: center; font-size: 12px; }
+.csa-drawer-qty input { width: 44px; height: 22px; border: 0; background: transparent; text-align: center; font: 700 12px 'Space Grotesk'; color: var(--ink); padding: 0; -moz-appearance: textfield; }
+.csa-drawer-qty input::-webkit-outer-spin-button,
+.csa-drawer-qty input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.csa-drawer-qty input:focus { outline: 2px solid var(--brand-accent); outline-offset: 1px; border-radius: 4px; }
+/* Iter35 — inline qty stepper on product card (matches drawer stepper style). */
+.csa-card-qty { display: inline-flex; align-items: center; gap: 4px; background: #fff; border: 1px solid var(--brand-accent); border-radius: 8px; padding: 2px 4px; }
+.csa-card-qty button { border: 0; background: transparent; width: 24px; height: 24px; font-weight: 700; color: var(--brand-accent); font-size: 14px; cursor: pointer; }
+.csa-card-qty button:hover { background: #fff0e6; border-radius: 4px; }
+.csa-card-qty strong { min-width: 22px; text-align: center; font: 700 13px 'Space Grotesk'; color: var(--brand-accent); }
 .csa-drawer-sub { font: 700 13px 'Space Grotesk'; color: var(--ink); }
 .csa-drawer-totals { border-top: 1px dashed #e6eaf0; padding-top: 12px; margin-top: 8px; display: grid; gap: 6px; }
 .csa-drawer-totals div { display: flex; justify-content: space-between; font-size: 12px; color: #596574; }

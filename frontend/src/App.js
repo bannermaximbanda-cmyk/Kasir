@@ -3432,6 +3432,11 @@ function CustomerSelfOrder() {
     return [...cur, { key, id: p.id, name: p.name, vendor: p.vendor, merchant_id: p.merchant_id, color: p.color, image_url: p.image_url, variant_id: variant?.id || null, variant_name: variant?.name || "", notes: notes || "", price: variant ? Number(variant.price) : Number(p.price), qty: 1 }];
   });
   const adjust = (key, delta) => setCart((cur) => cur.map((i) => i.key === key ? { ...i, qty: i.qty + delta } : i).filter((i) => i.qty > 0));
+  // Iter35 — set qty absolut (untuk input ketik langsung di cart drawer). Minimal 1.
+  const setQtyAbsolute = (key, next) => {
+    const n = Math.max(1, Math.floor(Number(next) || 0));
+    setCart((cur) => cur.map((i) => i.key === key ? { ...i, qty: n } : i));
+  };
   const handleFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setProof(r.result); r.readAsDataURL(f); };
   // Iter32 — rehydrate the per-tab hard-lock so a manual refresh cannot re-send the same order.
   useEffect(() => {
@@ -3482,7 +3487,7 @@ function CustomerSelfOrder() {
 
   // Categories + segmented filter mode (separate state from POS component)
   const cats = ["Semua", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean)))];
-  const [csaFilterMode, setCsaFilterMode] = useState("category"); // "category" | "merchant"
+  const [csaFilterMode, setCsaFilterMode] = useState("merchant"); // default: "merchant" (iter35) — pengguna bisa switch manual ke "category"
   const [csaMerchantFilter, setCsaMerchantFilter] = useState("all");
   const switchCsaMode = (next) => {
     if (next === csaFilterMode) return;
@@ -3597,6 +3602,10 @@ function CustomerSelfOrder() {
       <div className="csa-list">
         {pg.pageItems.map((p) => {
           const priceLabel = (p.variants||[]).filter(v=>v.active!==false).length > 0 ? `Mulai ${money(Math.min(...p.variants.filter(v=>v.active!==false).map(v=>v.price)))}` : money(p.price);
+          const hasVariants = (p.variants || []).filter((v) => v.active !== false).length > 0;
+          // Iter35 — for variant-less products, show qty stepper directly on card if already in cart.
+          // Match by product id ignoring variants (variant products keep the popup flow).
+          const inCartLine = !hasVariants ? cart.find((i) => i.id === p.id && !i.variant_id) : null;
           return <div key={p.id} className="csa-item" data-testid={`csa-item-${p.id}`}>
             <div className="csa-item-img" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name}/> : <Coffee size={30}/>}</div>
             <div className="csa-item-info">
@@ -3604,7 +3613,15 @@ function CustomerSelfOrder() {
               <span className="csa-vendor">by {p.vendor}</span>
               <div className="csa-item-foot">
                 <strong>{priceLabel}</strong>
-                <button className="csa-add-btn" onClick={() => handleProductClick(p)} data-testid={`csa-add-${p.id}`}><Plus size={14}/> Tambah</button>
+                {inCartLine ? (
+                  <div className="csa-card-qty" data-testid={`csa-card-qty-${p.id}`}>
+                    <button onClick={() => adjust(inCartLine.key, -1)} data-testid={`csa-card-dec-${p.id}`}>−</button>
+                    <strong data-testid={`csa-card-qty-value-${p.id}`}>{inCartLine.qty}</strong>
+                    <button onClick={() => adjust(inCartLine.key, 1)} data-testid={`csa-card-inc-${p.id}`}>+</button>
+                  </div>
+                ) : (
+                  <button className="csa-add-btn" onClick={() => handleProductClick(p)} data-testid={`csa-add-${p.id}`}><Plus size={14}/> Tambah</button>
+                )}
               </div>
             </div>
           </div>;
@@ -3656,7 +3673,26 @@ function CustomerSelfOrder() {
             </div>
             <div className="csa-drawer-qty">
               <button onClick={() => adjust(i.key, -1)} data-testid={`csa-dec-${i.key}`}>−</button>
-              <strong>{i.qty}</strong>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                inputMode="numeric"
+                value={i.qty}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "") return; // allow transient empty during typing; blur will fallback
+                  const n = Math.floor(Number(v));
+                  if (Number.isFinite(n) && n >= 1) setQtyAbsolute(i.key, n);
+                }}
+                onBlur={(e) => {
+                  const n = Math.floor(Number(e.target.value));
+                  if (!Number.isFinite(n) || n < 1) setQtyAbsolute(i.key, i.qty); // fallback ke qty sebelumnya
+                }}
+                onFocus={numOnFocus}
+                data-testid={`csa-qty-input-${i.key}`}
+                aria-label={`Jumlah ${i.name}`}
+              />
               <button onClick={() => adjust(i.key, 1)} data-testid={`csa-inc-${i.key}`}>+</button>
             </div>
             <strong className="csa-drawer-sub">{money(i.price * i.qty)}</strong>
