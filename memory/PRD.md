@@ -487,6 +487,54 @@ Tiga perubahan kecil di `CustomerSelfOrder` (App.js):
 - Klik "+ Tambah" → kartu langsung tampilkan stepper `[csa-card-qty-{pid}]`, klik `+` → qty jadi 2.
 - Cart drawer: input `[csa-qty-input-{key}]` menerima "20", Rincian Pesanan update ke `× 20`, total `Rp 300.000`.
 
+## Iter36 — Vendor Payout Center (Feb 2026)
+
+Perbaikan fitur Payout di Pusat Vendor (5 poin brief), REUSE tabel `mjd_payouts` yang sudah ada:
+
+**1. Settlement per Merchant** — Preview kini otomatis **mengecualikan sale_ids yang sudah masuk payout** (single source of truth: `mjd_payouts.sale_ids`). Row status pill `BELUM DIBAYAR` (kuning) di table Settlement.
+
+**2. Detail Payout** — Modal baru `PayoutDetailModal` menampilkan:
+   - Item terjual (agregasi per product+variant): `2× Batagor Original @ Rp15.000 = Rp30.000`
+   - Ringkasan: TOTAL ITEM TERJUAL / GROSS / KOMISI / BIAYA LAIN / NET DIBAYAR
+
+**3. Biaya Lain** — UI input `[nama biaya, nominal]` + tombol Tambah; bisa multiple; live re-compute `NET = GROSS − KOMISI − ∑ BIAYA LAIN`. Fee bisa dihapus dengan tombol X.
+
+**4. Bayar Merchant** — `POST /api/settlement/payouts` sekarang menyimpan:
+   - `items` (snapshot immutable list produk+qty+harga+subtotal saat payout)
+   - `extra_fees` (list `[{name, amount}]`)
+   - `extra_fees_total` + `net` (dihitung ulang server-side dari fee)
+   - `operator_id` + `operator_name` (user yang bayar)
+   Sale IDs yang sudah dibayar tidak akan muncul lagi di preview → mencegah double-pay. Endpoint tolak dengan 400 kalau merchant tidak punya omset unpaid.
+
+**5. Riwayat Payout** — Table diperluas dengan kolom **Biaya Lain** + kolom **Net Dibayar** + **Status "SUDAH DIBAYAR"** + tombol **CETAK**. Klik tombol Cetak buka `PayoutPrintModal` (slip A6-friendly, `window.print()` auto-triggered) yang menampilkan header, meta (merchant, periode, tanggal bayar, operator), rincian item, biaya lain, dan total dengan `NET DIBAYAR` bold.
+
+**Backend changes** (`server.py`, `models.py`):
+- `Payout` model: kolom baru `items` (JSON list), `extra_fees` (JSON list), `extra_fees_total` (Float).
+- `ALTER TABLE mjd_payouts ADD COLUMN IF NOT EXISTS items/extra_fees/extra_fees_total` di startup.
+- `_paid_sale_ids(db)` helper baru — union semua `mjd_payouts.sale_ids`.
+- `_compute_settlement_breakdown` skip sale ids yang sudah di-payout + build item aggregator per `(product_id, variant_id)`.
+- `PayoutInput` menerima `extra_fees: List[ExtraFee]`.
+- `create_payout` freeze `items` snapshot dari preview + validate/round extra fees + hitung ulang net.
+- `list_payouts` enrich dengan `merchant_name`.
+
+**Frontend changes** (`App.js`, `App.css`):
+- `PayoutDetailModal` menggantikan `PayoutConfirmModal` (nama lama).
+- `PayoutPrintModal` baru (auto-print on mount).
+- History table 10-kolom dengan tombol Cetak.
+- CSS `.payout-print-slip` (screen) + `@media print` rules untuk mencetak hanya slip.
+- Testid lengkap: `payout-items-list`, `payout-item-{i}`, `payout-total-items`, `payout-gross`, `payout-commission`, `payout-extra-total`, `payout-net`, `payout-fee-name`, `payout-fee-amount`, `payout-fee-add`, `payout-fee-{i}`, `payout-fee-remove-{i}`, `payout-confirm-button`, `settlement-status-{mid}`, `payout-status-{id}`, `payout-print-{id}`, `payout-print-slip`, `payout-print-again`.
+
+**Verified**:
+- Pytest `test_iteration36_payout_center.py::test_payout_full_flow` — 1/1 PASS
+  - Preview: gross=45k, commission=4.5k, items aggregated to 1 row (3× @ 15k).
+  - POST: extra_fees_total=15k, net=25.5k, items snapshot frozen.
+  - Preview after: merchant hilang (sale_ids sudah paid).
+  - POST kedua untuk periode sama → 400 "Belum ada omset untuk merchant".
+  - List: `merchant_name` diisi, `status=paid`.
+- Playwright screenshot: BELUM DIBAYAR pill visible, detail modal + item breakdown + 2 fees (10k+5k) → net Rp 1.000 live-recomputed.
+
+**Housekeeping**: TEST_ merchant + product + payout dibersihkan setelah test.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).

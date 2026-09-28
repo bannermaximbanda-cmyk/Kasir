@@ -2193,17 +2193,36 @@ async def export_products(
 
 # ── Settlement / Payout Center (per-merchant breakdown + ledger) ─────────────
 
+class ExtraFee(BaseModel):
+    name: str
+    amount: float
+
+
 class PayoutInput(BaseModel):
     merchant_id: str
     period_start: str  # YYYY-MM-DD
     period_end: str
     note: str = ""
+    extra_fees: List[ExtraFee] = []
+
+
+async def _paid_sale_ids(db: AsyncSession) -> set[str]:
+    """Return the set of sale_ids that have already been included in any prior payout."""
+    rows = (await db.execute(select(M.Payout.sale_ids))).all()
+    paid: set[str] = set()
+    for (sids,) in rows:
+        for sid in (sids or []):
+            paid.add(sid)
+    return paid
 
 
 async def _compute_settlement_breakdown(
     db: AsyncSession, outlet_id: Optional[str], date_from: Optional[str], date_to: Optional[str]
 ) -> list[dict]:
-    """Aggregate sales.lines per merchant with commission from merchant scheme."""
+    """Aggregate sales.lines per merchant with commission from merchant scheme.
+    Iter36: also returns per-item breakdown (`items`) and excludes sale_ids already
+    included in a prior payout (single-source-of-truth: `mjd_payouts.sale_ids`).
+    """
     merchants = (await db.execute(select(M.Merchant))).scalars().all()
     merchant_map = {m.id: m for m in merchants}
 
@@ -2216,9 +2235,12 @@ async def _compute_settlement_breakdown(
         # inclusive end-of-day
         stmt = stmt.where(M.Sale.created_at <= datetime.fromisoformat(date_to) + timedelta(days=1))
     sales = (await db.execute(stmt)).scalars().all()
+    already_paid = await _paid_sale_ids(db)
 
     buckets: dict[str, dict] = {}
     for sale in sales:
+        if sale.id in already_paid:
+            continue  # already settled — do NOT include in a new payout preview
         for line in (sale.lines or []):
             mid = line.get("merchant_id") or "unassigned"
             m = merchant_map.get(mid)
@@ -2231,6 +2253,7 @@ async def _compute_settlement_breakdown(
                 "gross": 0.0,
                 "item_count": 0,
                 "sale_ids": [],
+                "items": [],
                 "commission": 0.0,
                 "net": 0.0,
             })
@@ -2241,6 +2264,23 @@ async def _compute_settlement_breakdown(
             bucket["item_count"] += qty
             if sale.id not in bucket["sale_ids"]:
                 bucket["sale_ids"].append(sale.id)
+            # Aggregate line items per (product_id + variant) so the detail view
+            # shows "2× Batagor Original @ Rp15.000 = Rp30.000" rather than N rows.
+            key = f"{line.get('product_id') or ''}::{line.get('variant_id') or ''}"
+            item = next((it for it in bucket["items"] if it["_key"] == key), None)
+            if item is None:
+                bucket["items"].append({
+                    "_key": key,
+                    "product_id": line.get("product_id") or "",
+                    "name": line.get("name") or "",
+                    "variant_name": line.get("variant_name") or "",
+                    "quantity": qty,
+                    "price": price,
+                    "subtotal": gross_line,
+                })
+            else:
+                item["quantity"] += qty
+                item["subtotal"] += gross_line
             # commission per line
             if bucket["commission_scheme"] == "fixed":
                 bucket["commission"] += bucket["commission_fixed"] * qty
@@ -2250,6 +2290,11 @@ async def _compute_settlement_breakdown(
         b["gross"] = round(b["gross"])
         b["commission"] = round(b["commission"])
         b["net"] = b["gross"] - b["commission"]
+        # sort items by qty desc, drop the internal key
+        b["items"] = sorted(
+            [{k: v for k, v in it.items() if k != "_key"} for it in b["items"]],
+            key=lambda x: x["quantity"], reverse=True,
+        )
     # sort by gross desc
     return sorted(buckets.values(), key=lambda x: x["gross"], reverse=True)
 
@@ -2283,7 +2328,13 @@ async def list_payouts(
     if merchant_id:
         stmt = stmt.where(M.Payout.merchant_id == merchant_id)
     rows = (await db.execute(stmt)).scalars().all()
-    return [to_dict(r) for r in rows]
+    merchants = {m.id: m.name for m in (await db.execute(select(M.Merchant))).scalars().all()}
+    out = []
+    for r in rows:
+        d = to_dict(r)
+        d["merchant_name"] = merchants.get(r.merchant_id, "Tanpa Merchant")
+        out.append(d)
+    return out
 
 
 @api_router.post("/settlement/payouts")
@@ -2299,15 +2350,22 @@ async def create_payout(
     entry = next((b for b in breakdown if b["merchant_id"] == payload.merchant_id), None)
     if not entry or entry["gross"] <= 0:
         raise HTTPException(status_code=400, detail="Belum ada omset untuk merchant pada periode ini")
+    extra_list = [{"name": (f.name or "").strip()[:120], "amount": max(0.0, float(f.amount or 0))}
+                  for f in payload.extra_fees if (f.name or "").strip() and float(f.amount or 0) > 0]
+    extra_total = round(sum(f["amount"] for f in extra_list))
+    net = entry["gross"] - entry["commission"] - extra_total
     payout = M.Payout(
         merchant_id=payload.merchant_id,
         period_start=payload.period_start,
         period_end=payload.period_end,
         gross=entry["gross"],
         commission=entry["commission"],
-        net=entry["net"],
+        extra_fees=extra_list,
+        extra_fees_total=extra_total,
+        net=net,
         item_count=entry["item_count"],
         sale_ids=entry["sale_ids"],
+        items=entry["items"],
         status="paid",
         note=payload.note,
         operator_id=user.id,
@@ -2983,6 +3041,9 @@ async def bootstrap():
             "ALTER TABLE mjd_self_orders ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(32) DEFAULT ''",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_scheme VARCHAR(16) DEFAULT 'percent'",
             "ALTER TABLE mjd_merchants ADD COLUMN IF NOT EXISTS commission_fixed FLOAT DEFAULT 0",
+            "ALTER TABLE mjd_payouts ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE mjd_payouts ADD COLUMN IF NOT EXISTS extra_fees JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE mjd_payouts ADD COLUMN IF NOT EXISTS extra_fees_total FLOAT DEFAULT 0",
             "UPDATE mjd_self_orders SET status='Pesanan Diterima' WHERE status='Menunggu kasir'",
             "UPDATE mjd_users SET role='Admin' WHERE role='Merchant Admin'",
         ):

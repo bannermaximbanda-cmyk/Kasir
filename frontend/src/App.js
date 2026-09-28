@@ -2232,7 +2232,9 @@ function VendorCenter({ notify }) {
   const today = new Date().toISOString().slice(0, 10);
   const firstOfMonth = new Date(); firstOfMonth.setDate(1);
   const [period, setPeriod] = useState({ from: firstOfMonth.toISOString().slice(0, 10), to: today });
-  const [payoutModal, setPayoutModal] = useState(null); // { merchant_id, merchant_name, ... }
+  const [payoutModal, setPayoutModal] = useState(null); // { merchant_id, merchant_name, items, ... }
+  const [payoutBusy, setPayoutBusy] = useState(false);
+  const [printPayout, setPrintPayout] = useState(null); // full Payout row for CETAK
 
   const load = () => {
     axios.get(`${API}/vendor/orders`).then(({ data }) => setOrders(data)).catch(() => {});
@@ -2249,18 +2251,21 @@ function VendorCenter({ notify }) {
 
   const update = (id, status) => axios.patch(`${API}/vendor/orders/${id}?status=${encodeURIComponent(status)}`).then(load).then(() => notify("Status order diperbarui"));
 
-  const submitPayout = async (note) => {
-    if (!payoutModal) return;
+  const submitPayout = async (note, extraFees) => {
+    if (!payoutModal || payoutBusy) return;
+    setPayoutBusy(true);
     try {
       await axios.post(`${API}/settlement/payouts`, {
         merchant_id: payoutModal.merchant_id,
         period_start: period.from,
         period_end: period.to,
         note: note || "",
+        extra_fees: extraFees || [],
       });
-      notify(`Payout ${payoutModal.merchant_name} sebesar ${money(payoutModal.net)} tercatat`);
+      notify(`Payout ${payoutModal.merchant_name} tercatat`);
       setPayoutModal(null); loadPreview(); loadPayouts();
     } catch (e) { notify(e.response?.data?.detail || "Gagal membuat payout"); }
+    finally { setPayoutBusy(false); }
   };
 
   return <>
@@ -2310,7 +2315,7 @@ function VendorCenter({ notify }) {
           <Metric label="Net vendor" value={money(preview.totals.net)} change="Bersih ke tenant" tone="green" icon={Wallet} />
         </div>
         <div className="data-table" style={{ marginTop: 16 }}>
-          <div className="table-row table-label"><span>Merchant</span><span>Item</span><span>Skema</span><span>Gross</span><span>Komisi</span><span>Net</span><span /></div>
+          <div className="table-row table-label"><span>Merchant</span><span>Item</span><span>Skema</span><span>Gross</span><span>Komisi</span><span>Status</span><span /></div>
           {!preview.breakdown.length && <div className="empty-vendor"><Wallet size={30} /><b>Belum ada omset di periode ini</b><span>Ubah rentang tanggal atau lakukan transaksi POS</span></div>}
           {preview.breakdown.map((b) => <div className="table-row" key={b.merchant_id} data-testid={`settlement-row-${b.merchant_id}`}>
             <span><b>{b.merchant_name}</b></span>
@@ -2318,8 +2323,8 @@ function VendorCenter({ notify }) {
             <span><small>{b.commission_scheme === "fixed" ? `Fix ${money(b.commission_fixed)}/item` : `${b.commission_percent}%`}</small></span>
             <span><b>{money(b.gross)}</b></span>
             <span className="red-text">−{money(b.commission)}</span>
-            <span style={{ color: "#059669", fontWeight: 700 }}>{money(b.net)}</span>
-            <button className="primary-btn" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => setPayoutModal(b)} data-testid={`payout-btn-${b.merchant_id}`}>Bayar →</button>
+            <span><span className="method-badge" style={{ background: "#fef3c7", color: "#92400e" }} data-testid={`settlement-status-${b.merchant_id}`}>BELUM DIBAYAR</span></span>
+            <button className="primary-btn" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => setPayoutModal(b)} data-testid={`payout-btn-${b.merchant_id}`}>Detail →</button>
           </div>)}
         </div>
       </section>
@@ -2328,35 +2333,135 @@ function VendorCenter({ notify }) {
       <section className="panel" data-testid="payouts-panel">
         <div className="panel-head"><div><h2>Riwayat payout</h2><span>{payouts.length} entri tercatat</span></div><button className="outline-btn" onClick={loadPayouts}><RefreshCw size={14}/> Refresh</button></div>
         <div className="data-table">
-          <div className="table-row table-label"><span>Tanggal</span><span>Merchant</span><span>Periode</span><span>Item</span><span>Gross</span><span>Net</span><span>Status</span></div>
+          <div className="table-row payout-row table-label"><span>Tanggal</span><span>Merchant</span><span>Periode</span><span>Item</span><span>Gross</span><span>Komisi</span><span>Biaya Lain</span><span>Net</span><span>Status</span><span /></div>
           {!payouts.length && <div className="empty-vendor"><FileText size={30} /><b>Belum ada payout tercatat</b><span>Buat payout dari tab Settlement</span></div>}
-          {payouts.map((p) => <div className="table-row" key={p.id} data-testid={`payout-row-${p.id}`}>
+          {payouts.map((p) => <div className="table-row payout-row" key={p.id} data-testid={`payout-row-${p.id}`}>
             <span><small>{new Date(p.created_at).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" })}</small></span>
-            <span><b>{p.merchant_id?.slice(0, 12)}…</b></span>
+            <span><b data-testid={`payout-merchant-${p.id}`}>{p.merchant_name || p.merchant_id?.slice(0, 12) + "…"}</b></span>
             <span><small>{p.period_start} → {p.period_end}</small></span>
             <span>{p.item_count}</span>
             <span>{money(p.gross)}</span>
+            <span className="red-text">−{money(p.commission)}</span>
+            <span className="red-text">−{money(p.extra_fees_total || 0)}</span>
             <span style={{ color: "#059669", fontWeight: 700 }}>{money(p.net)}</span>
-            <span><span className="method-badge" style={{ background: "#dcfce7", color: "#166534" }}>{p.status}</span></span>
+            <span><span className="method-badge" style={{ background: "#dcfce7", color: "#166534" }} data-testid={`payout-status-${p.id}`}>SUDAH DIBAYAR</span></span>
+            <button className="small-action" onClick={() => setPrintPayout(p)} data-testid={`payout-print-${p.id}`}><Printer size={12}/> Cetak</button>
           </div>)}
         </div>
       </section>
     </>}
-    {payoutModal && <PayoutConfirmModal entry={payoutModal} period={period} onClose={() => setPayoutModal(null)} onConfirm={submitPayout} />}
+    {payoutModal && <PayoutDetailModal entry={payoutModal} period={period} busy={payoutBusy} onClose={() => setPayoutModal(null)} onConfirm={submitPayout} />}
+    {printPayout && <PayoutPrintModal payout={printPayout} onClose={() => setPrintPayout(null)} />}
   </>;
 }
 
-function PayoutConfirmModal({ entry, period, onClose, onConfirm }) {
+function PayoutDetailModal({ entry, period, busy, onClose, onConfirm }) {
   const [note, setNote] = useState("");
-  return <div className="modal-backdrop"><div className="pay-modal" data-testid="payout-confirm-modal">
+  const [extraFees, setExtraFees] = useState([]); // [{name, amount}]
+  const [feeName, setFeeName] = useState("");
+  const [feeAmt, setFeeAmt] = useState("");
+  const addFee = () => {
+    const name = feeName.trim();
+    const amt = Math.max(0, Number(feeAmt) || 0);
+    if (!name || amt <= 0) return;
+    setExtraFees((cur) => [...cur, { name, amount: amt }]);
+    setFeeName(""); setFeeAmt("");
+  };
+  const removeFee = (i) => setExtraFees((cur) => cur.filter((_, idx) => idx !== i));
+  const extraTotal = extraFees.reduce((a, f) => a + Number(f.amount || 0), 0);
+  const netFinal = (entry.gross || 0) - (entry.commission || 0) - extraTotal;
+  return <div className="modal-backdrop"><div className="pay-modal" data-testid="payout-detail-modal" style={{ maxWidth: 620 }}>
     <button className="modal-close" onClick={onClose}><X size={18}/></button>
-    <div className="pay-head"><h2>Konfirmasi Payout</h2><span>Merchant: {entry.merchant_name}</span></div>
+    <div className="pay-head"><h2>Detail Payout</h2><span>{entry.merchant_name} · {period.from} → {period.to}</span></div>
     <div className="pay-body">
-      <div className="bind-info"><b>Periode</b><span>{period.from} → {period.to}</span><b>Total Item</b><span>{entry.item_count}</span><b>Gross</b><span>{money(entry.gross)}</span><b>Komisi</b><span className="red-text">−{money(entry.commission)}</span><b>Net Payout</b><span style={{ color: "#059669", fontWeight: 700 }}>{money(entry.net)}</span></div>
-      <label>Catatan (opsional)</label>
+      <b style={{ display: "block", marginBottom: 8, fontSize: 13, color: "#374151" }}>ITEM TERJUAL</b>
+      <div className="payout-items" data-testid="payout-items-list" style={{ display: "grid", gap: 6, marginBottom: 12, maxHeight: 220, overflowY: "auto", background: "#fafafa", padding: 10, borderRadius: 8 }}>
+        {(entry.items || []).map((it, i) => <div key={i} className="payout-item-row" data-testid={`payout-item-${i}`} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 4, fontSize: 12, lineHeight: 1.4 }}>
+          <span><b>{it.quantity}×</b> {it.name}{it.variant_name && <em style={{ color: "#78716c", fontStyle: "normal" }}> · {it.variant_name}</em>} <small style={{ color: "#6b7280" }}>@ {money(it.price)}</small></span>
+          <b>{money(it.subtotal)}</b>
+        </div>)}
+        {(!entry.items || !entry.items.length) && <span style={{ fontSize: 12, color: "#6b7280" }}>Belum ada rincian item.</span>}
+      </div>
+
+      <div className="bind-info" style={{ marginBottom: 12 }}>
+        <b>TOTAL ITEM TERJUAL</b><span data-testid="payout-total-items">{entry.item_count}</span>
+        <b>GROSS</b><span data-testid="payout-gross">{money(entry.gross)}</span>
+        <b>KOMISI</b><span className="red-text" data-testid="payout-commission">−{money(entry.commission)}</span>
+        <b>BIAYA LAIN</b><span className="red-text" data-testid="payout-extra-total">−{money(extraTotal)}</span>
+        <b>NET DIBAYAR</b><span style={{ color: "#059669", fontWeight: 700 }} data-testid="payout-net">{money(netFinal)}</span>
+      </div>
+
+      <b style={{ display: "block", marginBottom: 6, fontSize: 13, color: "#374151" }}>BIAYA LAIN (opsional)</b>
+      <div className="payout-fee-list" data-testid="payout-fee-list" style={{ display: "grid", gap: 4, marginBottom: 8 }}>
+        {extraFees.map((f, i) => <div key={i} data-testid={`payout-fee-${i}`} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 6, alignItems: "center", fontSize: 12, background: "#fff7ed", padding: "6px 10px", borderRadius: 6 }}>
+          <span>{f.name}</span>
+          <b>{money(f.amount)}</b>
+          <button className="icon-danger" onClick={() => removeFee(i)} data-testid={`payout-fee-remove-${i}`}><X size={12}/></button>
+        </div>)}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 130px auto", gap: 6 }}>
+        <input value={feeName} onChange={(e) => setFeeName(e.target.value)} placeholder="Nama biaya" data-testid="payout-fee-name" />
+        <input type="number" value={feeAmt} onChange={(e) => setFeeAmt(e.target.value)} onFocus={numOnFocus} placeholder="Nominal" data-testid="payout-fee-amount" />
+        <button className="outline-btn" onClick={addFee} data-testid="payout-fee-add"><Plus size={12}/> Tambah</button>
+      </div>
+
+      <label style={{ marginTop: 12, display: "block" }}>Catatan (opsional)</label>
       <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Contoh: Transfer BCA 04/12" data-testid="payout-note-input" />
     </div>
-    <button className="primary-btn full" onClick={() => onConfirm(note)} data-testid="payout-confirm-button"><Check size={14}/> Bayar {money(entry.net)}</button>
+    <button className="primary-btn full" disabled={busy || netFinal < 0} onClick={() => onConfirm(note, extraFees)} data-testid="payout-confirm-button">
+      {busy ? <><RefreshCw size={14} className="spin"/> Memproses…</> : <><Check size={14}/> Bayar {money(netFinal)}</>}
+    </button>
+  </div></div>;
+}
+
+function PayoutPrintModal({ payout, onClose }) {
+  useEffect(() => {
+    // small delay to allow render before print
+    const t = setTimeout(() => { try { window.print(); } catch {} }, 250);
+    return () => clearTimeout(t);
+  }, []);
+  const fmt = (iso) => iso ? new Date(iso).toLocaleString("id-ID") : "-";
+  return <div className="modal-backdrop payout-print-backdrop"><div className="payout-print-slip" data-testid="payout-print-slip">
+    <button className="modal-close no-print" onClick={onClose}><X size={18}/></button>
+    <div className="payout-print-head">
+      <h2>MJD KUPI — BUKTI PAYOUT</h2>
+      <span>#{String(payout.id).slice(-8).toUpperCase()}</span>
+    </div>
+    <div className="payout-print-meta">
+      <div><b>Merchant</b><span>{payout.merchant_name || payout.merchant_id}</span></div>
+      <div><b>Periode</b><span>{payout.period_start} → {payout.period_end}</span></div>
+      <div><b>Tanggal Bayar</b><span>{fmt(payout.created_at)}</span></div>
+      <div><b>Dibayar Oleh</b><span>{payout.operator_name || "—"}</span></div>
+    </div>
+    <hr/>
+    <b>RINCIAN ITEM</b>
+    <ul className="payout-print-items">
+      {(payout.items || []).map((it, i) => <li key={i}>
+        <span>{it.quantity}× {it.name}{it.variant_name ? ` · ${it.variant_name}` : ""} @ {money(it.price)}</span>
+        <b>{money(it.subtotal)}</b>
+      </li>)}
+      {(!payout.items || !payout.items.length) && <li><small>Item detail tidak tersedia untuk payout lama.</small></li>}
+    </ul>
+    {(payout.extra_fees && payout.extra_fees.length > 0) && <>
+      <hr/>
+      <b>BIAYA LAIN</b>
+      <ul className="payout-print-items">
+        {payout.extra_fees.map((f, i) => <li key={i}><span>{f.name}</span><b>{money(f.amount)}</b></li>)}
+      </ul>
+    </>}
+    <hr/>
+    <div className="payout-print-totals">
+      <div><span>Total Item Terjual</span><b>{payout.item_count}</b></div>
+      <div><span>Gross</span><b>{money(payout.gross)}</b></div>
+      <div><span>Komisi</span><b>−{money(payout.commission)}</b></div>
+      <div><span>Biaya Lain</span><b>−{money(payout.extra_fees_total || 0)}</b></div>
+      <div className="grand"><span>NET DIBAYAR</span><strong>{money(payout.net)}</strong></div>
+    </div>
+    {payout.note && <p className="payout-print-note"><small>Catatan: {payout.note}</small></p>}
+    <div className="payout-print-actions no-print">
+      <button className="outline-btn" onClick={() => window.print()} data-testid="payout-print-again"><Printer size={14}/> Cetak</button>
+      <button className="primary-btn" onClick={onClose}>Tutup</button>
+    </div>
   </div></div>;
 }
 

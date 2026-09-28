@@ -226,6 +226,12 @@ class Payout(Base):
     period_end = Column(String(20), default="")
     gross = Column(Float, default=0.0)
     commission = Column(Float, default=0.0)
+    # Iter36 — extra fees (biaya lain): [{name, amount}, ...]; extra_fees_total is sum for report.
+    extra_fees = Column(JSON, default=list)
+    extra_fees_total = Column(Float, default=0.0)
+    # Iter36 — snapshot of item-level breakdown at payout time (immutable audit trail):
+    # [{product_id, name, variant_name, quantity, price, subtotal}, ...]
+    items = Column(JSON, default=list)
     net = Column(Float, default=0.0)
     item_count = Column(Integer, default=0)
     sale_ids = Column(JSON, default=list)

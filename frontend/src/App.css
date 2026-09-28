@@ -135,7 +135,37 @@
   .shift-report-modal{position:absolute;left:0;top:0;width:100%;box-shadow:none;background:#fff}
   .shift-actions,.modal-close,.shift-report-modal .text-btn{display:none!important}
   .modal-backdrop{background:#fff!important;position:static}
+  /* Payout print slip — only slip visible; hide interactive controls */
+  .payout-print-backdrop,.payout-print-backdrop *{visibility:visible}
+  .payout-print-backdrop{position:absolute;left:0;top:0;width:100%;background:#fff!important}
+  .payout-print-slip{box-shadow:none!important;border:0!important;width:100%!important;max-width:none!important}
+  .no-print{display:none!important}
 }
+
+/* Payout print slip (screen) */
+.payout-print-slip{background:#fff;width:520px;max-width:94vw;border-radius:12px;padding:24px;position:relative;box-shadow:0 20px 50px #18212b33;max-height:90vh;overflow-y:auto;font-family:'Space Grotesk',system-ui,sans-serif}
+.payout-print-head{display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid #111;padding-bottom:8px;margin-bottom:12px}
+.payout-print-head h2{font:700 18px 'Space Grotesk';margin:0;letter-spacing:.5px}
+.payout-print-head span{font:600 12px 'Courier New',monospace;color:#4b5563}
+.payout-print-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:12px;margin-bottom:12px}
+.payout-print-meta div{display:flex;flex-direction:column}
+.payout-print-meta b{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px}
+.payout-print-slip hr{border:0;border-top:1px dashed #d1d5db;margin:10px 0}
+.payout-print-slip>b{display:block;font-size:11px;letter-spacing:.5px;color:#111;margin-bottom:6px;text-transform:uppercase}
+.payout-print-items{list-style:none;padding:0;margin:0 0 4px;display:grid;gap:4px;font-size:12px}
+.payout-print-items li{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:baseline}
+.payout-print-items li b{font-weight:700;font-family:'Courier New',monospace}
+.payout-print-totals{display:grid;gap:4px;font-size:12px}
+.payout-print-totals div{display:grid;grid-template-columns:1fr auto;gap:8px}
+.payout-print-totals div b{font-family:'Courier New',monospace}
+.payout-print-totals .grand{border-top:2px solid #111;padding-top:6px;margin-top:4px}
+.payout-print-totals .grand span,.payout-print-totals .grand strong{font-size:14px;color:#111}
+.payout-print-totals .grand strong{color:#059669;font-family:'Courier New',monospace}
+.payout-print-note{margin:10px 0 0;color:#6b7280;font-size:11px}
+.payout-print-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px}
+.payout-print-actions .outline-btn,.payout-print-actions .primary-btn{justify-content:center}
+/* Payout history row: 10 columns */
+.payout-row{grid-template-columns:82px 1.4fr 1.4fr 60px 100px 90px 90px 100px 110px 90px!important}
 
 /* Shift report modal */
 .shift-report-modal{background:#fff;width:420px;max-width:92vw;border-radius:12px;padding:22px;position:relative;box-shadow:0 20px 50px #18212b33;max-height:90vh;overflow-y:auto}
