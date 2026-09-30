@@ -9,7 +9,8 @@ from typing import Any, List, Optional
 import bcrypt
 import jwt
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,10 @@ import models as M
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
+
+# Local uploads (WebP-compressed images). Kept small: prod max 600px, logo 400px, banner 1200px.
+UPLOAD_DIR = ROOT_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("mjd-kupi")
@@ -928,6 +933,59 @@ async def adjust_stock(
     finally:
         if idem_lock is not None and idem_lock.locked():
             idem_lock.release()
+
+
+# -----------------------------------------------------------------------------
+# Image upload — resize + compress to WebP, save to /uploads, return public URL.
+# Contract: FE compresses too (fast path). BE re-compresses defensively so DB
+# only stores small URLs, never Base64. Max dimensions by scope:
+#   product → 600px, logo → 400px, banner → 1200px.
+# -----------------------------------------------------------------------------
+_IMAGE_MAX = {"product": 600, "logo": 400, "banner": 1200}
+_IMAGE_QUALITY = 78  # WebP quality — visually near-lossless, ~5-8× smaller than JPEG.
+
+
+@api_router.post("/upload/image")
+async def upload_image(
+    file: UploadFile = File(...),
+    scope: str = Query("product", pattern="^(product|logo|banner)$"),
+    user: M.User = Depends(current_user),
+):
+    """Accept any image → resize (keep aspect) → save as WebP → return {url}."""
+    from io import BytesIO
+    from PIL import Image, ImageOps
+
+    max_side = _IMAGE_MAX.get(scope, 600)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="File kosong")
+    # Cap raw upload size at 10MB to prevent OOM; frontend already compresses.
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File terlalu besar (max 10MB)")
+    try:
+        img = Image.open(BytesIO(raw))
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+        w, h = img.size
+        scale = max(w, h)
+        if scale > max_side:
+            ratio = max_side / scale
+            img = img.resize((max(1, int(w * ratio)), max(1, int(h * ratio))), Image.LANCZOS)
+        # Ensure RGB for WebP with white background if source had alpha
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        fname = f"{scope}-{uuid.uuid4().hex}.webp"
+        out_path = UPLOAD_DIR / fname
+        img.save(out_path, "WEBP", quality=_IMAGE_QUALITY, method=6)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Gambar tidak valid: {e}") from e
+    return {"url": f"/api/uploads/{fname}", "size": out_path.stat().st_size, "scope": scope}
+
 
 
 @api_router.get("/stock-logs")
@@ -3059,6 +3117,9 @@ async def shutdown_engine():
 
 
 app.include_router(api_router)
+
+# Serve uploaded images (WebP) under /api/uploads/... — routed through ingress like the API.
+app.mount("/api/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,

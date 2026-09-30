@@ -11,6 +11,7 @@ import {
   Download, FileSpreadsheet, TrendingDown, TrendingUp, ArrowRightLeft, Pencil, Filter, Eye as EyeOn,
 } from "lucide-react";
 import { pairPrinter, directPrint, isPrinterConnected, pairedPrinterName, isPrinterSupported, buildSaleReceipt, buildShiftReport, buildKitchenTicket } from "@/utils/thermalPrinter";
+import { uploadImage } from "@/utils/imageUpload";
 import { queueSale, drainQueue, queuedCount } from "@/utils/offlineQueue";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import * as XLSX from "xlsx";
@@ -698,7 +699,7 @@ function POS({ products, merchants = [], query, setQuery, category, setCategory,
           <div className="product-grid" data-testid="pos-product-grid">
             {pg.total === 0 && <div className="empty-vendor" style={{ gridColumn: "1/-1" }} data-testid="pos-empty-menu"><Search size={26}/><b>Tidak ada menu</b><span>Ubah pencarian atau kategori</span></div>}
             {pg.pageItems.map((p) => <button className="product-card" key={p.id} onClick={() => handleProductClick(p)} disabled={locked} data-testid={`product-card-${p.id}`}>
-              <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={30} />}<span>{p.stock} stok</span></div>
+              <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" loading="lazy" decoding="async" /> : <Coffee size={30} />}<span>{p.stock} stok</span></div>
               <div className="product-info"><b>{p.name}</b><span>{p.vendor}{(p.variants||[]).filter(v=>v.active!==false).length>0 && ` · ${(p.variants||[]).filter(v=>v.active!==false).length} varian`}</span><strong>{money(p.price)}</strong></div>
               <div className="add-product"><Plus size={17} /></div>
             </button>)}
@@ -1358,7 +1359,11 @@ function Products({ products, merchants, outlets = [], session, reload, notify }
       notify(`✅ Produk ${form.name} tersimpan ${form.is_global ? "(Berlaku di semua outlet)" : ""}`);
     } catch (e) { notify(`❌ ${e.response?.data?.detail || "Gagal simpan produk"}`); }
   };
-  const handleImage = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setForm({ ...form, image_url: r.result }); r.readAsDataURL(f); };
+  const handleImage = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const url = await uploadImage(f, "product");
+    setForm((s) => ({ ...s, image_url: url }));
+  };
   const addFormVariant = () => setForm({ ...form, variants: [...(form.variants || []), { name: "", price: Number(form.price) || 0, cost: Number(form.cost) || 0, active: true }] });
   const updFormVariant = (i, patch) => setForm({ ...form, variants: form.variants.map((v, idx) => idx === i ? { ...v, ...patch } : v) });
   const rmFormVariant = (i) => setForm({ ...form, variants: form.variants.filter((_, idx) => idx !== i) });
@@ -1505,7 +1510,7 @@ function Products({ products, merchants, outlets = [], session, reload, notify }
       {filtered.map((p) => {
         const inactive = p.is_active === false;
         return <div className={`catalog-item ${inactive ? "is-inactive" : ""}`} key={p.id} data-testid={`product-card-${p.id}`}>
-          <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" /> : <Coffee size={26} />}
+          <div className="product-art" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} className="product-img" loading="lazy" decoding="async" /> : <Coffee size={26} />}
             {inactive && <span className="inactive-badge" data-testid={`inactive-badge-${p.id}`}>TIDAK AKTIF</span>}
           </div>
           <div><b>{p.name}</b><span>{p.vendor} · {p.category}{p.sku ? ` · SKU ${p.sku}` : ""}</span>
@@ -1547,7 +1552,11 @@ function ProductEditModal({ product, merchants, outlets = [], session, onClose, 
     variants: (product.variants || []).map((v) => ({ ...v })),
   });
   const [saving, setSaving] = useState(false);
-  const handleImage = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => setForm({ ...form, image_url: r.result }); r.readAsDataURL(f); };
+  const handleImage = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const url = await uploadImage(f, "product");
+    setForm((s) => ({ ...s, image_url: url }));
+  };
   const addV = () => setForm({ ...form, variants: [...form.variants, { name: "", price: Number(form.price) || 0, cost: Number(form.cost) || 0, active: true }] });
   const updV = (i, patch) => setForm({ ...form, variants: form.variants.map((v, idx) => idx === i ? { ...v, ...patch } : v) });
   const rmV = (i) => setForm({ ...form, variants: form.variants.filter((_, idx) => idx !== i) });
@@ -1844,7 +1853,12 @@ function WhiteLabelModal({ merchant, onClose, onSaved }) {
     subscription_status: merchant.subscription_status || "active",
     features_enabled: merchant.features_enabled || {},
   });
-  const setFile = (key) => (e) => { const file = e.target.files?.[0]; if (!file) return; const r = new FileReader(); r.onload = () => setF((s) => ({ ...s, [key]: r.result })); r.readAsDataURL(file); };
+  const setFile = (key) => async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const scope = key === "banner_url" ? "banner" : "logo";
+    const url = await uploadImage(file, scope);
+    setF((s) => ({ ...s, [key]: url }));
+  };
   const toggleFeature = (k) => setF((s) => ({ ...s, features_enabled: { ...s.features_enabled, [k]: s.features_enabled[k] === false ? true : false } }));
   const save = async () => {
     try {
@@ -2142,8 +2156,17 @@ function SelfService({ products, notify, activeOutlet, outlets }) {
     axios.get(`${API}/outlets/${pickOutlet}/shift-status`).then(({ data }) => setShiftOpen(!!data.open)).catch(() => {});
   }, [pickOutlet]);
   const upd = (patch) => setSettings((s) => ({ ...s, ...patch }));
-  const upload = (key) => (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => upd({ [key]: r.result }); r.readAsDataURL(f); };
-  const addBanner = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => upd({ banners: [...(settings.banners || []), r.result] }); r.readAsDataURL(f); };
+  const upload = (key) => async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const scope = key === "header_image" ? "banner" : "logo";
+    const url = await uploadImage(f, scope);
+    upd({ [key]: url });
+  };
+  const addBanner = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const url = await uploadImage(f, "banner");
+    upd({ banners: [...(settings.banners || []), url] });
+  };
   const removeBanner = (i) => upd({ banners: settings.banners.filter((_, idx) => idx !== i) });
   const save = async () => {
     try { await axios.post(`${API}/outlets/${pickOutlet}/self-service`, settings); notify(`Konfigurasi ${validOutlets.find(o=>o.id===pickOutlet)?.name || pickOutlet} tersimpan`); }
@@ -2201,7 +2224,7 @@ function SelfService({ products, notify, activeOutlet, outlets }) {
         </div>
         <div className="ss-banners">
           {(settings.banners || []).map((b, i) => <div className="ss-banner-thumb" key={i}>
-            <img src={b} alt={`banner-${i}`}/>
+            <img src={b} alt={`banner-${i}`} loading="lazy" decoding="async"/>
             <button className="icon-danger" onClick={() => removeBanner(i)} data-testid={`remove-banner-${i}`}><X size={13}/></button>
           </div>)}
           <label className="ss-banner-add">
@@ -2486,7 +2509,7 @@ function SettingsPage({ notify, role, session, brandingText, onBrandingTextSaved
 
   const savePrinter = async () => { await axios.post(`${API}/settings`, { key: "printer", value: printer }); notify("Pengaturan printer tersimpan"); };
   const saveLogo = async (dataUrl) => { setLogo(dataUrl); await axios.post(`${API}/settings`, { key: "logo", value: { logo_data: dataUrl } }); notify("Logo diperbarui — akan muncul di navbar & struk"); };
-  const handleLogo = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => saveLogo(r.result); r.readAsDataURL(f); };
+  const handleLogo = async (e) => { const f = e.target.files?.[0]; if (!f) return; const url = await uploadImage(f, "logo"); saveLogo(url); };
   const pair = async () => { try { const { name } = await pairPrinter(); setPairName(name); setConnected(true); notify(`Printer "${name}" tersambung`); } catch (e) { notify(e.message || "Gagal sambung printer"); } };
   const saveOutlet = async () => {
     if (!outletForm.name) return notify("Nama outlet wajib");
@@ -3712,7 +3735,7 @@ function CustomerSelfOrder() {
           // Match by product id ignoring variants (variant products keep the popup flow).
           const inCartLine = !hasVariants ? cart.find((i) => i.id === p.id && !i.variant_id) : null;
           return <div key={p.id} className="csa-item" data-testid={`csa-item-${p.id}`}>
-            <div className="csa-item-img" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name}/> : <Coffee size={30}/>}</div>
+            <div className="csa-item-img" style={{ background: p.color }}>{p.image_url ? <img src={p.image_url} alt={p.name} loading="lazy" decoding="async"/> : <Coffee size={30}/>}</div>
             <div className="csa-item-info">
               <b>{p.name}</b>
               <span className="csa-vendor">by {p.vendor}</span>

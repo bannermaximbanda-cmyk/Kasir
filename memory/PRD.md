@@ -535,6 +535,53 @@ Perbaikan fitur Payout di Pusat Vendor (5 poin brief), REUSE tabel `mjd_payouts`
 
 **Housekeeping**: TEST_ merchant + product + payout dibersihkan setelah test.
 
+## Iter37 — Image Optimization: Resize + WebP + File URLs (Feb 2026)
+
+Fokus: bikin app seringan mungkin. TIDAK ada perubahan UI/fitur, TIDAK ada refactor besar.
+
+**Backend** (`server.py`)
+- Endpoint baru `POST /api/upload/image?scope=product|logo|banner` (multipart) → resize (aspect-preserved) + convert ke WebP quality=78 method=6 → simpan ke `backend/uploads/<scope>-<uuid>.webp` → return `{url}`.
+- Max side per scope: `product=600px`, `logo=400px`, `banner=1200px` (sesuai brief).
+- `/api/uploads/*` mounted sebagai StaticFiles → CDN-friendly, di-serve langsung via `content-type: image/webp`.
+- Cap raw upload 10MB defense-in-depth (client sudah kompres sebelumnya).
+- Pillow `ImageOps.exif_transpose` untuk auto-rotate dari EXIF; alpha di-flatten ke background putih agar WebP kecil.
+
+**Frontend** (`src/utils/imageUpload.js` baru)
+- Helper `uploadImage(file, scope)` yang:
+  1. Resize di canvas dulu (client-side, hemat traffic + CPU server).
+  2. Encode ke WebP quality=0.82.
+  3. POST ke `/api/upload/image` sebagai multipart → dapat URL.
+  4. Fallback ke data-URL kalau upload gagal (backward-compatible, tidak break UX).
+- Cross-browser: `createImageBitmap` dengan fallback `<img>` untuk Safari.
+
+**Wire-up di `App.js`** (semua callsite FileReader→base64 untuk gambar diganti):
+1. `handleImage` di form produk (create + edit) → scope `product`.
+2. `setFile` di White-Label merchant modal → scope `logo` / `banner`.
+3. `upload` di Self-Service management → scope `logo` (logo_url) / `banner` (header_image).
+4. `addBanner` di Self-Service banner carousel → scope `banner`.
+5. `handleLogo` di Settings (brand logo global) → scope `logo`.
+
+**Lazy loading** (native browser `loading="lazy" decoding="async"`) di `<img>` tags yang berat:
+- POS product card grid, Products management grid, CustomerSelfOrder product cards, Self-Service banner thumbnails.
+- Brand logo & QR image tetap eager (above-the-fold, kecil).
+
+**Non-target (sesuai brief "Jangan sentuh bagian lain")**:
+- Payment proof (bukti bayar QRIS/Transfer customer) tetap pakai FileReader/base64 — bukan asset UI.
+- CSV/XLSX bulk import file reader tetap — bukan gambar.
+
+**Verified end-to-end** (curl smoke test, 1600×1000 PNG → WebP):
+- product scope: 500 B (600×375, quality tetap OK)
+- logo scope: 266 B (400×250)
+- banner scope: 1688 B (1200×750)
+- StaticFiles serves `image/webp` `200 OK` via `/api/uploads/*`.
+
+**Impact estimate**:
+- Foto produk 2 MB JPEG asli → ~5-15 KB WebP di DB URL (kompresi ~150–400×).
+- DB row size berkurang drastis (dari `image_url TEXT` ~2.7 MB base64 → ~40 char URL).
+- Product list scroll makin cepat (native lazy loading skip request untuk kartu di luar viewport).
+
+**Backward-compat**: existing base64 image_url/logo_url di DB masih di-render normal via `<img src=...>`. Migration tidak diperlukan.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).
