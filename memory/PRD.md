@@ -582,6 +582,40 @@ Fokus: bikin app seringan mungkin. TIDAK ada perubahan UI/fitur, TIDAK ada refac
 
 **Backward-compat**: existing base64 image_url/logo_url di DB masih di-render normal via `<img src=...>`. Migration tidak diperlukan.
 
+## Iter38 — Backfill Base64 → File URL (Feb 2026)
+
+Script migrasi `backend/migrate_images_base64.py` untuk konversi data lama base64 yang sudah masuk DB → file WebP di `/api/uploads/`. **Skrip idempotent + safe** (tulis file & verify sebelum overwrite kolom DB; base64 lama tidak dihapus sampai URL baru sukses ter-persist).
+
+**Kolom yang di-scan**:
+- `mjd_products.image_url` → scope `product` (600px)
+- `mjd_merchants.logo_url` → scope `logo` (400px)
+- `mjd_merchants.banner_url` → scope `banner` (1200px)
+- `mjd_settings.value` untuk key `self_service:*`, `logo`, `printer_config`, `qris-image:*`:
+  - scalar: `logo_url`, `logo_data`, `header_image`, `image` → scope logo/banner
+  - list: `banners[]` → scope banner
+
+**Aman & Idempotent**:
+- Nama file = `<scope>-<sha256(webp)[0:32]>.webp` → run ulang TIDAK bikin file duplikat.
+- File ditulis via `<name>.webp.part` → `.replace()` (atomic POSIX rename).
+- Verify on-disk (`size == expected`) SEBELUM tulis URL ke DB.
+- `--dry-run` flag untuk preview tanpa side-effect.
+- Skip: entry kosong, sudah URL (`http://...` / `/api/uploads/...`), format tidak dikenali.
+
+**Hasil eksekusi production**:
+- Products: `345 scanned`, **`285 migrated`**, 60 empty, 0 error.
+  - DB bytes-before: **92.5 MB** → bytes-after: **16.5 KB** (URL saja).
+- Merchants: 19 scanned, 0 base64 (semua sudah kosong/URL).
+- Settings: 21 scanned, **6 key touched**, **13 field ter-migrasi**:
+  - `logo.logo_data`, `printer_config.logo_url`
+  - `self_service:45832592-…`: logo_url + header_image + banners[0..1]
+  - `self_service:outlet-sudirman`: logo_url + header_image + banners[0..2]
+  - `qris-image:4b916dd1-…` & `qris-image:45832592-…`: image
+- **168 file WebP unik** di `/app/backend/uploads/` = **4.3 MB total** (dari ~92 MB DB base64 → 21× lebih kecil, dedup SHA256 karena banyak produk share foto sama).
+
+**Idempotency test**: run kedua → `migrated=0, already_url=285, keys_touched=0, files=168` (tidak ada perubahan).
+
+**Verifikasi public**: `GET {REACT_APP_BACKEND_URL}/api/uploads/<file>.webp` → `200 image/webp`.
+
 ## Backlog (P1/P2)
 - **P1 REFACTORING (Urgent)**: Split `server.py` (~2467 lines) → routers/{auth, products, sales, merchants, settings, branding, kds, shifts, inventory, settlement}.py. Split `App.js` (~2700 lines) → components/pages folder structure.
 - P1: Immediate subscription lockout — add `subscription_status` check inside `current_user()` dependency, not just at login (currently allows session until token expires).
